@@ -82,17 +82,20 @@ Important settings:
 [input]
 enabled = true
 force_button = "right" # left | right | middle | none
+pending_left_ms = 100.0
+pending_left_motion = 30.0
 
 [clicks]
 normal_threshold = 70
 force_threshold = 165
 double_click_force_threshold = 220
 double_click_window_ms = 350.0
+normal_release_threshold = 60
 
 [drag_release]
 enabled = true
-movement = 80.0
-threshold = 45
+movement = 30.0
+threshold = 30
 
 [drag_haptics]
 enabled = false

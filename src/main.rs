@@ -1,7 +1,7 @@
 use std::env;
 use std::ffi::c_int;
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::mem::size_of;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::raw::c_ulong;
@@ -52,12 +52,21 @@ const IOC_NONE: u64 = 0;
 
 const SIGINT: c_int = 2;
 const SIGTERM: c_int = 15;
+const POLLIN: i16 = 0x0001;
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
+
+#[repr(C)]
+struct PollFd {
+    fd: c_int,
+    events: i16,
+    revents: i16,
+}
 
 unsafe extern "C" {
     fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
     fn signal(signum: c_int, handler: extern "C" fn(c_int)) -> usize;
+    fn poll(fds: *mut PollFd, nfds: c_ulong, timeout: c_int) -> c_int;
 }
 
 extern "C" fn handle_signal(_: c_int) {
@@ -100,6 +109,8 @@ struct DeviceConfig {
 struct InputConfig {
     enabled: bool,
     force_button: Option<u16>,
+    pending_left_ms: f64,
+    pending_left_motion: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -111,6 +122,7 @@ struct ClickConfig {
     reset_threshold: i32,
     rearm_threshold: i32,
     force_rearm_threshold: i32,
+    normal_release_threshold: i32,
     min_gap_ms: f64,
 }
 
@@ -203,6 +215,8 @@ impl Default for Config {
             input: InputConfig {
                 enabled: true,
                 force_button: Some(BTN_RIGHT),
+                pending_left_ms: 100.0,
+                pending_left_motion: 30.0,
             },
             clicks: ClickConfig {
                 normal_threshold: 70,
@@ -212,6 +226,7 @@ impl Default for Config {
                 reset_threshold: 35,
                 rearm_threshold: 65,
                 force_rearm_threshold: 125,
+                normal_release_threshold: 60,
                 min_gap_ms: 120.0,
             },
             release: ReleaseConfig {
@@ -223,8 +238,8 @@ impl Default for Config {
             },
             drag_release: DragReleaseConfig {
                 enabled: true,
-                movement: 80.0,
-                threshold: 45,
+                movement: 30.0,
+                threshold: 30,
                 debug: false,
             },
             haptics: HapticsConfig {
@@ -283,8 +298,13 @@ struct Args {
     no_input: bool,
     no_restore: bool,
     force_button: Option<Option<u16>>,
+    pending_left_ms: Option<f64>,
+    pending_left_motion: Option<f64>,
     double_click_force_threshold: Option<i32>,
     double_click_window_ms: Option<f64>,
+    normal_release_threshold: Option<i32>,
+    drag_release_threshold: Option<i32>,
+    drag_release_motion: Option<f64>,
     seconds: Option<f64>,
 }
 
@@ -299,8 +319,13 @@ impl Args {
             no_input: false,
             no_restore: false,
             force_button: None,
+            pending_left_ms: None,
+            pending_left_motion: None,
             double_click_force_threshold: None,
             double_click_window_ms: None,
+            normal_release_threshold: None,
+            drag_release_threshold: None,
+            drag_release_motion: None,
             seconds: None,
         };
 
@@ -324,6 +349,14 @@ impl Args {
                     let value = next_arg(&mut args, "--force-button")?;
                     parsed.force_button = Some(parse_button_name("--force-button", &value)?);
                 }
+                "--pending-left-ms" => {
+                    let value = next_arg(&mut args, "--pending-left-ms")?;
+                    parsed.pending_left_ms = Some(parse_f64("--pending-left-ms", &value)?);
+                }
+                "--pending-left-motion" => {
+                    let value = next_arg(&mut args, "--pending-left-motion")?;
+                    parsed.pending_left_motion = Some(parse_f64("--pending-left-motion", &value)?);
+                }
                 "--double-click-force-threshold" => {
                     let value = next_arg(&mut args, "--double-click-force-threshold")?;
                     parsed.double_click_force_threshold =
@@ -333,6 +366,20 @@ impl Args {
                     let value = next_arg(&mut args, "--double-click-window-ms")?;
                     parsed.double_click_window_ms =
                         Some(parse_f64("--double-click-window-ms", &value)?);
+                }
+                "--normal-release-threshold" => {
+                    let value = next_arg(&mut args, "--normal-release-threshold")?;
+                    parsed.normal_release_threshold =
+                        Some(parse_i32("--normal-release-threshold", &value)?);
+                }
+                "--drag-release-threshold" => {
+                    let value = next_arg(&mut args, "--drag-release-threshold")?;
+                    parsed.drag_release_threshold =
+                        Some(parse_i32("--drag-release-threshold", &value)?);
+                }
+                "--drag-release-motion" => {
+                    let value = next_arg(&mut args, "--drag-release-motion")?;
+                    parsed.drag_release_motion = Some(parse_f64("--drag-release-motion", &value)?);
                 }
                 "--seconds" => {
                     let value = next_arg(&mut args, "--seconds")?;
@@ -360,10 +407,19 @@ fn print_help() {
            --dry-run           Print resolved config and reports without touching hardware\n\
            --force             Allow non-Magic Trackpad 2 HID IDs\n\
            --force-button BTN  Button emitted by force click: left, right, middle, none\n\
+           --pending-left-ms N Delay one-finger BTN_LEFT down so force can replace it\n\
+           --pending-left-motion N\n\
+                                Commit pending BTN_LEFT after this centroid movement\n\
            --double-click-force-threshold N\n\
                                 Harder force threshold after a double-click hold\n\
            --double-click-window-ms N\n\
                                 Max time between click release and next click for double-click guard\n\
+           --normal-release-threshold N\n\
+                                Release non-drag normal input at/below this pressure\n\
+           --drag-release-threshold N\n\
+                                Release drag normal input at/below this pressure\n\
+           --drag-release-motion N\n\
+                                Movement that marks a normal click as a drag\n\
            --no-input          Disable /dev/uinput mouse events\n\
            --no-restore        Leave host-click mode enabled on exit\n\
            --seconds N         Stop after N seconds\n"
@@ -511,6 +567,8 @@ fn apply_config_value(config: &mut Config, key: &str, value: ConfigValue) -> Res
         "input.force_button" => {
             config.input.force_button = parse_button_name(key, &value_string(key, value)?)?;
         }
+        "input.pending_left_ms" => config.input.pending_left_ms = value_f64(key, value)?,
+        "input.pending_left_motion" => config.input.pending_left_motion = value_f64(key, value)?,
         "clicks.normal_threshold" => config.clicks.normal_threshold = value_i32(key, value)?,
         "clicks.force_threshold" => config.clicks.force_threshold = value_i32(key, value)?,
         "clicks.double_click_force_threshold" => {
@@ -523,6 +581,15 @@ fn apply_config_value(config: &mut Config, key: &str, value: ConfigValue) -> Res
         "clicks.rearm_threshold" => config.clicks.rearm_threshold = value_i32(key, value)?,
         "clicks.force_rearm_threshold" => {
             config.clicks.force_rearm_threshold = value_i32(key, value)?;
+        }
+        "clicks.normal_release_threshold" => {
+            config.clicks.normal_release_threshold = value_i32(key, value)?;
+        }
+        "clicks.drag_release_threshold" => {
+            config.drag_release.threshold = value_i32(key, value)?;
+        }
+        "clicks.drag_release_motion" => {
+            config.drag_release.movement = value_f64(key, value)?;
         }
         "clicks.min_gap_ms" => config.clicks.min_gap_ms = value_f64(key, value)?,
         "release.drop" => config.release.drop = value_i32(key, value)?,
@@ -648,6 +715,19 @@ fn validate_config(config: &Config) -> Result<()> {
     if config.clicks.double_click_window_ms < 0.0 {
         return Err("clicks.double_click_window_ms must not be negative".to_string());
     }
+    if config.input.pending_left_ms < 0.0 {
+        return Err("input.pending_left_ms must not be negative".to_string());
+    }
+    if config.input.pending_left_motion < 0.0 {
+        return Err("input.pending_left_motion must not be negative".to_string());
+    }
+    if config.clicks.normal_release_threshold < 0
+        || config.clicks.normal_release_threshold >= config.clicks.normal_threshold
+    {
+        return Err(
+            "clicks.normal_release_threshold must be below clicks.normal_threshold".to_string(),
+        );
+    }
     if config.drag_release.enabled {
         if config.drag_release.movement < 1.0 {
             return Err("drag_release.movement must be at least 1".to_string());
@@ -655,10 +735,8 @@ fn validate_config(config: &Config) -> Result<()> {
         if !(0..=255).contains(&config.drag_release.threshold) {
             return Err("drag_release.threshold must be in byte range 0..255".to_string());
         }
-        if config.drag_release.threshold > config.clicks.rearm_threshold {
-            return Err(
-                "drag_release.threshold must be at most clicks.rearm_threshold".to_string(),
-            );
+        if config.drag_release.threshold >= config.clicks.normal_threshold {
+            return Err("drag_release.threshold must be below clicks.normal_threshold".to_string());
         }
     }
     if config.drag.enabled {
@@ -791,12 +869,13 @@ fn format_optional_ms(value: Option<f64>) -> String {
 fn print_resolved_config(config: &Config, device: &str) {
     println!("device: {device}");
     println!(
-        "thresholds: normal >= {}; force >= {}; double-click force >= {} within {}ms; force re-arm <= {}; re-arm <= {}; reset <= {}",
+        "thresholds: normal >= {}; force >= {}; double-click force >= {} within {}ms; force re-arm <= {}; normal release <= {}; re-arm <= {}; reset <= {}",
         config.clicks.normal_threshold,
         config.clicks.force_threshold,
         config.clicks.double_click_force_threshold,
         format_number(config.clicks.double_click_window_ms),
         config.clicks.force_rearm_threshold,
+        config.clicks.normal_release_threshold,
         config.clicks.rearm_threshold,
         config.clicks.reset_threshold
     );
@@ -823,7 +902,12 @@ fn print_resolved_config(config: &Config, device: &str) {
     println!(
         "input: {}",
         if config.input.enabled {
-            input_summary(config.input.force_button)
+            format!(
+                "{}; pending-left={}ms motion={}",
+                input_summary(config.input.force_button),
+                format_number(config.input.pending_left_ms),
+                format_number(config.input.pending_left_motion)
+            )
         } else {
             "disabled".to_string()
         }
@@ -1237,7 +1321,6 @@ impl VirtualMouse {
             if force_button == BTN_LEFT {
                 return Ok(());
             }
-            self.normal_up()?;
         } else if self.normal_button.is_some() {
             return Ok(());
         }
@@ -1322,14 +1405,7 @@ fn should_fire_release(
     peak_after_down: i32,
     down_time: Option<Instant>,
     now: Instant,
-    click_drag_active: bool,
 ) -> (bool, String) {
-    if click_drag_active {
-        if pressure <= config.drag_release.threshold {
-            return (true, "drag-threshold".to_string());
-        }
-        return (false, String::new());
-    }
     if pressure <= config.clicks.reset_threshold {
         return (true, "threshold".to_string());
     }
@@ -1733,6 +1809,9 @@ struct PressureState {
     last_click_haptic: Option<Instant>,
     last_normal_release: Option<Instant>,
     double_click_force_guard: bool,
+    pending_normal_button: Option<u16>,
+    pending_normal_deadline: Option<Instant>,
+    pending_normal_centroid: Option<(f64, f64)>,
     click_drag_start_centroid: Option<(f64, f64)>,
     click_drag_active: bool,
     peak_after_down: i32,
@@ -1785,6 +1864,95 @@ fn active_force_threshold(config: &Config, state: &PressureState) -> i32 {
         config.clicks.double_click_force_threshold
     } else {
         config.clicks.force_threshold
+    }
+}
+
+fn pending_normal_active(state: &PressureState) -> bool {
+    state.pending_normal_button.is_some()
+}
+
+fn should_defer_normal_input(config: &Config, button: u16, touch_count: usize) -> bool {
+    config.input.enabled
+        && config.input.pending_left_ms > 0.0
+        && button == BTN_LEFT
+        && touch_count == 1
+        && config.input.force_button.is_some()
+        && config.input.force_button != Some(BTN_LEFT)
+}
+
+fn clear_pending_normal_input(state: &mut PressureState) {
+    state.pending_normal_button = None;
+    state.pending_normal_deadline = None;
+    state.pending_normal_centroid = None;
+}
+
+fn arm_normal_input(
+    config: &Config,
+    mouse: &mut VirtualMouse,
+    state: &mut PressureState,
+    button: u16,
+    touch_count: usize,
+    centroid: Option<(f64, f64)>,
+    now: Instant,
+) -> Result<bool> {
+    if should_defer_normal_input(config, button, touch_count) {
+        state.pending_normal_button = Some(button);
+        state.pending_normal_deadline =
+            Some(now + Duration::from_secs_f64(config.input.pending_left_ms / 1000.0));
+        state.pending_normal_centroid = centroid;
+        return Ok(true);
+    }
+    mouse.normal_down(button)?;
+    Ok(false)
+}
+
+fn commit_pending_normal_input(
+    mouse: &mut VirtualMouse,
+    state: &mut PressureState,
+    reason: &str,
+) -> Result<()> {
+    let Some(button) = state.pending_normal_button else {
+        return Ok(());
+    };
+    println!("pending-left-down reason={reason}");
+    clear_pending_normal_input(state);
+    mouse.normal_down(button)
+}
+
+fn cancel_pending_normal_input(state: &mut PressureState, reason: &str) {
+    if state.pending_normal_button.is_some() {
+        println!("pending-left-cancel reason={reason}");
+        clear_pending_normal_input(state);
+    }
+}
+
+fn maybe_commit_pending_for_motion(
+    config: &Config,
+    mouse: &mut VirtualMouse,
+    state: &mut PressureState,
+    centroid: Option<(f64, f64)>,
+) -> Result<()> {
+    if state.pending_normal_button.is_none()
+        || config.input.pending_left_motion <= 0.0
+        || centroid.is_none()
+        || state.pending_normal_centroid.is_none()
+    {
+        return Ok(());
+    }
+    let centroid = centroid.unwrap();
+    let start = state.pending_normal_centroid.unwrap();
+    let moved = ((centroid.0 - start.0).powi(2) + (centroid.1 - start.1).powi(2)).sqrt();
+    if moved >= config.input.pending_left_motion {
+        commit_pending_normal_input(mouse, state, &format!("motion={moved:.1}"))?;
+    }
+    Ok(())
+}
+
+fn normal_release_threshold_for_current_click(config: &Config, state: &PressureState) -> i32 {
+    if state.click_drag_active {
+        config.drag_release.threshold
+    } else {
+        config.clicks.normal_release_threshold
     }
 }
 
@@ -1864,8 +2032,6 @@ fn process_report(
     let mut force_released_this_sample = false;
 
     update_click_drag_state(config, state, centroid);
-    let guard_normal_drag_release =
-        state.stage == 1 && state.normal_up_pending && state.click_drag_active;
     let (release, release_reason) = should_fire_release(
         config,
         pressure,
@@ -1874,14 +2040,17 @@ fn process_report(
         state.peak_after_down,
         state.last_fire,
         now,
-        guard_normal_drag_release,
     );
 
-    if state.stage == 1 && state.normal_up_pending && release {
+    let normal_release_threshold = normal_release_threshold_for_current_click(config, state);
+    let normal_release = pressure <= normal_release_threshold;
+
+    if state.stage == 1 && state.normal_up_pending && normal_release {
         println!(
-            "normal-release pressure={pressure} peak={} reason={release_reason}",
-            state.peak_after_down
+            "normal-release pressure={pressure} peak={} reason=threshold<={normal_release_threshold}",
+            state.peak_after_down,
         );
+        commit_pending_normal_input(mouse, state, "normal-release")?;
         mouse.normal_up()?;
         send_click_up(file, &reports.normal_up, state)?;
         state.normal_up_pending = false;
@@ -1920,7 +2089,7 @@ fn process_report(
         return Ok(());
     }
 
-    if state.stage == 3 && state.normal_up_pending && pressure <= config.clicks.rearm_threshold {
+    if state.stage == 3 && state.normal_up_pending && normal_release {
         let suppress_normal_haptic = state
             .last_force_release
             .map(|last| {
@@ -1944,6 +2113,7 @@ fn process_report(
                 ""
             }
         );
+        commit_pending_normal_input(mouse, state, "force-upper-release")?;
         mouse.normal_up()?;
         if !suppress_normal_haptic {
             send_click_up(file, &reports.normal_up, state)?;
@@ -1984,7 +2154,7 @@ fn process_report(
             state.force_rearmed = false;
             state.last_force_release = Some(Instant::now());
         }
-        if state.normal_up_pending {
+        if state.normal_up_pending && normal_release {
             let suppress_normal_haptic = state
                 .last_force_release
                 .map(|last| {
@@ -2008,12 +2178,28 @@ fn process_report(
                     ""
                 }
             );
+            commit_pending_normal_input(mouse, state, "reset")?;
             mouse.normal_up()?;
             if !suppress_normal_haptic {
                 send_click_up(file, &reports.normal_up, state)?;
             }
             state.normal_up_pending = false;
             record_normal_release(state, now);
+        }
+        if state.normal_up_pending {
+            maybe_send_motion_haptics(
+                file,
+                config,
+                reports,
+                state,
+                now,
+                pressure,
+                centroid,
+                touch_count,
+            )?;
+            state.previous_pressure = Some(pressure);
+            state.previous_time = Some(now);
+            return Ok(());
         }
         if state.stage != 0 {
             println!("re-armed at pressure={pressure}");
@@ -2044,9 +2230,11 @@ fn process_report(
     if state.stage == 0 && pressure >= config.clicks.normal_threshold {
         let normal_button = button_for_touch_count(touch_count);
         state.double_click_force_guard = is_double_click_hold(config, state, now, touch_count);
+        let deferred_input = should_defer_normal_input(config, normal_button, touch_count);
         println!(
-            "normal-click pressure={pressure} button={} fingers={touch_count} force-threshold={}{}{location}",
+            "normal-click pressure={pressure} button={} fingers={touch_count} input={} force-threshold={}{}{location}",
             button_name(normal_button),
+            if deferred_input { "pending" } else { "down" },
             active_force_threshold(config, state),
             if state.double_click_force_guard {
                 " reason=double-click-guard"
@@ -2054,7 +2242,15 @@ fn process_report(
                 ""
             }
         );
-        mouse.normal_down(normal_button)?;
+        arm_normal_input(
+            config,
+            mouse,
+            state,
+            normal_button,
+            touch_count,
+            centroid,
+            now,
+        )?;
         send_click_down(file, &reports.normal_down, state)?;
         state.stage = 1;
         state.normal_up_pending = true;
@@ -2086,8 +2282,10 @@ fn process_report(
         .map(|last| now.duration_since(last).as_secs_f64() >= config.clicks.min_gap_ms / 1000.0)
         .unwrap_or(true);
     let force_threshold = active_force_threshold(config, state);
-    if state.stage == 1 && gap_elapsed && pressure >= force_threshold {
+    let force_gap_elapsed = gap_elapsed || pending_normal_active(state);
+    if state.stage == 1 && force_gap_elapsed && pressure >= force_threshold {
         println!("force-click pressure={pressure} threshold={force_threshold}{location}");
+        cancel_pending_normal_input(state, "force-click");
         mouse.force_down()?;
         send_click_down(file, &reports.force_down, state)?;
         state.stage = 2;
@@ -2116,6 +2314,10 @@ fn process_report(
         state.peak_after_down = state.peak_after_down.max(pressure);
     }
 
+    if state.stage == 1 {
+        maybe_commit_pending_for_motion(config, mouse, state, centroid)?;
+    }
+
     maybe_send_motion_haptics(
         file,
         config,
@@ -2129,6 +2331,48 @@ fn process_report(
     state.previous_pressure = Some(pressure);
     state.previous_time = Some(now);
     Ok(())
+}
+
+fn timeout_millis_until(deadline: Instant, now: Instant) -> i32 {
+    if deadline <= now {
+        return 0;
+    }
+    deadline
+        .duration_since(now)
+        .as_millis()
+        .min(c_int::MAX as u128) as c_int
+}
+
+fn next_read_timeout(end: Option<Instant>, state: &PressureState) -> c_int {
+    let now = Instant::now();
+    let mut timeout = 500;
+    if let Some(end) = end {
+        timeout = timeout.min(timeout_millis_until(end, now));
+    }
+    if let Some(deadline) = state.pending_normal_deadline {
+        timeout = timeout.min(timeout_millis_until(deadline, now));
+    }
+    timeout
+}
+
+fn wait_readable(fd: RawFd, timeout_ms: c_int) -> Result<bool> {
+    let mut poll_fd = PollFd {
+        fd,
+        events: POLLIN,
+        revents: 0,
+    };
+    let result = unsafe { poll(&mut poll_fd, 1, timeout_ms) };
+    if result > 0 {
+        return Ok((poll_fd.revents & POLLIN) != 0);
+    }
+    if result == 0 {
+        return Ok(false);
+    }
+    let err = io::Error::last_os_error();
+    if err.kind() == ErrorKind::Interrupted {
+        return Ok(false);
+    }
+    Err(format!("hidraw poll failed: {err}"))
 }
 
 fn run_daemon(config: Config, force: bool, seconds: Option<f64>) -> Result<()> {
@@ -2170,6 +2414,18 @@ fn run_daemon(config: Config, force: bool, seconds: Option<f64>) -> Result<()> {
         if end.map(|end| Instant::now() >= end).unwrap_or(false) {
             break;
         }
+        let timeout_ms = next_read_timeout(end, &state);
+        let readable = wait_readable(file.as_raw_fd(), timeout_ms)?;
+        if state
+            .pending_normal_deadline
+            .map(|deadline| Instant::now() >= deadline)
+            .unwrap_or(false)
+        {
+            commit_pending_normal_input(&mut mouse, &mut state, "timeout")?;
+        }
+        if !readable {
+            continue;
+        }
         match file.read(&mut buf) {
             Ok(0) => continue,
             Ok(len) => process_report(
@@ -2190,6 +2446,7 @@ fn run_daemon(config: Config, force: bool, seconds: Option<f64>) -> Result<()> {
         send_click_up(&mut file, &reports.force_up, &mut state)?;
     }
     if state.normal_up_pending {
+        cancel_pending_normal_input(&mut state, "exit");
         mouse.normal_up()?;
         send_click_up(&mut file, &reports.normal_up, &mut state)?;
     }
@@ -2217,11 +2474,26 @@ fn real_main() -> Result<()> {
     if let Some(force_button) = args.force_button {
         config.input.force_button = force_button;
     }
+    if let Some(pending_left_ms) = args.pending_left_ms {
+        config.input.pending_left_ms = pending_left_ms;
+    }
+    if let Some(pending_left_motion) = args.pending_left_motion {
+        config.input.pending_left_motion = pending_left_motion;
+    }
     if let Some(threshold) = args.double_click_force_threshold {
         config.clicks.double_click_force_threshold = threshold;
     }
     if let Some(window_ms) = args.double_click_window_ms {
         config.clicks.double_click_window_ms = window_ms;
+    }
+    if let Some(threshold) = args.normal_release_threshold {
+        config.clicks.normal_release_threshold = threshold;
+    }
+    if let Some(threshold) = args.drag_release_threshold {
+        config.drag_release.threshold = threshold;
+    }
+    if let Some(motion) = args.drag_release_motion {
+        config.drag_release.movement = motion;
     }
     if args.no_restore {
         config.device.restore_on_exit = false;
