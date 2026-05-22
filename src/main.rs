@@ -106,6 +106,8 @@ struct InputConfig {
 struct ClickConfig {
     normal_threshold: i32,
     force_threshold: i32,
+    double_click_force_threshold: i32,
+    double_click_window_ms: f64,
     reset_threshold: i32,
     rearm_threshold: i32,
     force_rearm_threshold: i32,
@@ -173,6 +175,8 @@ impl Default for Config {
             clicks: ClickConfig {
                 normal_threshold: 70,
                 force_threshold: 165,
+                double_click_force_threshold: 220,
+                double_click_window_ms: 350.0,
                 reset_threshold: 35,
                 rearm_threshold: 65,
                 force_rearm_threshold: 125,
@@ -221,6 +225,8 @@ struct Args {
     no_input: bool,
     no_restore: bool,
     force_button: Option<Option<u16>>,
+    double_click_force_threshold: Option<i32>,
+    double_click_window_ms: Option<f64>,
     seconds: Option<f64>,
 }
 
@@ -235,6 +241,8 @@ impl Args {
             no_input: false,
             no_restore: false,
             force_button: None,
+            double_click_force_threshold: None,
+            double_click_window_ms: None,
             seconds: None,
         };
 
@@ -257,6 +265,16 @@ impl Args {
                 "--force-button" => {
                     let value = next_arg(&mut args, "--force-button")?;
                     parsed.force_button = Some(parse_button_name("--force-button", &value)?);
+                }
+                "--double-click-force-threshold" => {
+                    let value = next_arg(&mut args, "--double-click-force-threshold")?;
+                    parsed.double_click_force_threshold =
+                        Some(parse_i32("--double-click-force-threshold", &value)?);
+                }
+                "--double-click-window-ms" => {
+                    let value = next_arg(&mut args, "--double-click-window-ms")?;
+                    parsed.double_click_window_ms =
+                        Some(parse_f64("--double-click-window-ms", &value)?);
                 }
                 "--seconds" => {
                     let value = next_arg(&mut args, "--seconds")?;
@@ -284,6 +302,10 @@ fn print_help() {
            --dry-run           Print resolved config and reports without touching hardware\n\
            --force             Allow non-Magic Trackpad 2 HID IDs\n\
            --force-button BTN  Button emitted by force click: left, right, middle, none\n\
+           --double-click-force-threshold N\n\
+                                Harder force threshold after a double-click hold\n\
+           --double-click-window-ms N\n\
+                                Max time between click release and next click for double-click guard\n\
            --no-input          Disable /dev/uinput mouse events\n\
            --no-restore        Leave host-click mode enabled on exit\n\
            --seconds N         Stop after N seconds\n"
@@ -292,6 +314,10 @@ fn print_help() {
 
 fn parse_f64(name: &str, value: &str) -> Result<f64> {
     value.parse::<f64>().map_err(|err| format!("{name}: {err}"))
+}
+
+fn parse_i32(name: &str, value: &str) -> Result<i32> {
+    value.parse::<i32>().map_err(|err| format!("{name}: {err}"))
 }
 
 fn default_config_path() -> Option<PathBuf> {
@@ -429,6 +455,12 @@ fn apply_config_value(config: &mut Config, key: &str, value: ConfigValue) -> Res
         }
         "clicks.normal_threshold" => config.clicks.normal_threshold = value_i32(key, value)?,
         "clicks.force_threshold" => config.clicks.force_threshold = value_i32(key, value)?,
+        "clicks.double_click_force_threshold" => {
+            config.clicks.double_click_force_threshold = value_i32(key, value)?;
+        }
+        "clicks.double_click_window_ms" => {
+            config.clicks.double_click_window_ms = value_f64(key, value)?;
+        }
         "clicks.reset_threshold" => config.clicks.reset_threshold = value_i32(key, value)?,
         "clicks.rearm_threshold" => config.clicks.rearm_threshold = value_i32(key, value)?,
         "clicks.force_rearm_threshold" => {
@@ -527,6 +559,15 @@ fn validate_config(config: &Config) -> Result<()> {
             "click thresholds must be strictly increasing through force_threshold".to_string(),
         );
     }
+    if config.clicks.double_click_force_threshold < config.clicks.force_threshold {
+        return Err(
+            "clicks.double_click_force_threshold must be at least clicks.force_threshold"
+                .to_string(),
+        );
+    }
+    if config.clicks.double_click_window_ms < 0.0 {
+        return Err("clicks.double_click_window_ms must not be negative".to_string());
+    }
     if config.drag.enabled {
         let intervals = [
             ("drag_haptics.min_gap_ms", config.drag.min_gap_ms),
@@ -607,9 +648,11 @@ fn format_optional_ms(value: Option<f64>) -> String {
 fn print_resolved_config(config: &Config, device: &str) {
     println!("device: {device}");
     println!(
-        "thresholds: normal >= {}; force >= {}; force re-arm <= {}; re-arm <= {}; reset <= {}",
+        "thresholds: normal >= {}; force >= {}; double-click force >= {} within {}ms; force re-arm <= {}; re-arm <= {}; reset <= {}",
         config.clicks.normal_threshold,
         config.clicks.force_threshold,
+        config.clicks.double_click_force_threshold,
+        format_number(config.clicks.double_click_window_ms),
         config.clicks.force_rearm_threshold,
         config.clicks.rearm_threshold,
         config.clicks.reset_threshold
@@ -1280,6 +1323,8 @@ struct PressureState {
     last_fire: Option<Instant>,
     last_force_release: Option<Instant>,
     last_click_haptic: Option<Instant>,
+    last_normal_release: Option<Instant>,
+    double_click_force_guard: bool,
     peak_after_down: i32,
     previous_pressure: Option<i32>,
     previous_time: Option<Instant>,
@@ -1298,6 +1343,36 @@ fn send_click_up(file: &mut File, report: &[u8; 15], state: &mut PressureState) 
     write_output(file, report)?;
     state.last_click_haptic = Some(Instant::now());
     Ok(())
+}
+
+fn record_normal_release(state: &mut PressureState, now: Instant) {
+    state.last_normal_release = Some(now);
+    state.double_click_force_guard = false;
+}
+
+fn is_double_click_hold(
+    config: &Config,
+    state: &PressureState,
+    now: Instant,
+    touch_count: usize,
+) -> bool {
+    touch_count == 1
+        && config.clicks.double_click_window_ms > 0.0
+        && state
+            .last_normal_release
+            .map(|last| {
+                now.duration_since(last).as_secs_f64()
+                    <= config.clicks.double_click_window_ms / 1000.0
+            })
+            .unwrap_or(false)
+}
+
+fn active_force_threshold(config: &Config, state: &PressureState) -> i32 {
+    if state.double_click_force_guard {
+        config.clicks.double_click_force_threshold
+    } else {
+        config.clicks.force_threshold
+    }
 }
 
 fn process_report(
@@ -1338,6 +1413,7 @@ fn process_report(
         send_click_up(file, &reports.normal_up, state)?;
         state.normal_up_pending = false;
         state.stage = 4;
+        record_normal_release(state, now);
     } else if state.stage == 2 && state.force_up_pending && release {
         println!(
             "force-release pressure={pressure} peak={} reason={release_reason}",
@@ -1400,6 +1476,7 @@ fn process_report(
             send_click_up(file, &reports.normal_up, state)?;
         }
         state.normal_up_pending = false;
+        record_normal_release(state, now);
         println!("re-armed at pressure={pressure} reason=force-upper-release");
         state.stage = 0;
         state.force_up_pending = false;
@@ -1463,6 +1540,7 @@ fn process_report(
                 send_click_up(file, &reports.normal_up, state)?;
             }
             state.normal_up_pending = false;
+            record_normal_release(state, now);
         }
         if state.stage != 0 {
             println!("re-armed at pressure={pressure}");
@@ -1492,9 +1570,16 @@ fn process_report(
 
     if state.stage == 0 && pressure >= config.clicks.normal_threshold {
         let normal_button = button_for_touch_count(touch_count);
+        state.double_click_force_guard = is_double_click_hold(config, state, now, touch_count);
         println!(
-            "normal-click pressure={pressure} button={} fingers={touch_count}{location}",
-            button_name(normal_button)
+            "normal-click pressure={pressure} button={} fingers={touch_count} force-threshold={}{}{location}",
+            button_name(normal_button),
+            active_force_threshold(config, state),
+            if state.double_click_force_guard {
+                " reason=double-click-guard"
+            } else {
+                ""
+            }
         );
         mouse.normal_down(normal_button)?;
         send_click_down(file, &reports.normal_down, state)?;
@@ -1521,8 +1606,9 @@ fn process_report(
         .last_fire
         .map(|last| now.duration_since(last).as_secs_f64() >= config.clicks.min_gap_ms / 1000.0)
         .unwrap_or(true);
-    if state.stage == 1 && gap_elapsed && pressure >= config.clicks.force_threshold {
-        println!("force-click pressure={pressure}{location}");
+    let force_threshold = active_force_threshold(config, state);
+    if state.stage == 1 && gap_elapsed && pressure >= force_threshold {
+        println!("force-click pressure={pressure} threshold={force_threshold}{location}");
         mouse.force_down()?;
         send_click_down(file, &reports.force_down, state)?;
         state.stage = 2;
@@ -1536,12 +1622,11 @@ fn process_report(
         println!("force re-armed at pressure={pressure}");
         state.force_rearmed = true;
         state.peak_after_down = pressure;
-    } else if state.stage == 3
-        && state.force_rearmed
-        && gap_elapsed
-        && pressure >= config.clicks.force_threshold
+    } else if state.stage == 3 && state.force_rearmed && gap_elapsed && pressure >= force_threshold
     {
-        println!("force-click pressure={pressure}{location} reason=re-force");
+        println!(
+            "force-click pressure={pressure} threshold={force_threshold}{location} reason=re-force"
+        );
         mouse.force_down()?;
         send_click_down(file, &reports.force_down, state)?;
         state.stage = 2;
@@ -1652,6 +1737,12 @@ fn real_main() -> Result<()> {
     }
     if let Some(force_button) = args.force_button {
         config.input.force_button = force_button;
+    }
+    if let Some(threshold) = args.double_click_force_threshold {
+        config.clicks.double_click_force_threshold = threshold;
+    }
+    if let Some(window_ms) = args.double_click_window_ms {
+        config.clicks.double_click_window_ms = window_ms;
     }
     if args.no_restore {
         config.device.restore_on_exit = false;

@@ -10,6 +10,8 @@ force_button = "right"
 [clicks]
 normal_threshold = 70
 force_threshold = 165
+double_click_force_threshold = 220
+double_click_window_ms = 350.0
 reset_threshold = 35
 rearm_threshold = 65
 force_rearm_threshold = 125
