@@ -183,6 +183,24 @@ debug = false
 
 ### Haptics
 
+The haptics settings only change what the click feels like. The `[clicks]` and
+`[release]` sections decide when haptics fire; this section decides which HID
+report bytes are sent when they do.
+
+The trackpad haptic command is a 15-byte HID report. The daemon starts from
+known working down/up report templates and exposes only the fields we have been
+tuning. The byte numbers below are zero-based offsets in the final HID report,
+matching the probe/sweep terminology.
+
+Every haptic pulse has two parts:
+
+- a down report, used for the click impact;
+- an up report, used for release or for ending short synthetic pulses.
+
+Click and force-click haptics send those reports when the pressure state machine
+crosses the configured thresholds. Drag and ridge haptics send a down report,
+wait `down_ms`, then send the matching up report.
+
 ```toml
 [haptics]
 down_param = 0x40170606
@@ -197,12 +215,58 @@ down_byte3 = 0x17
 up_byte3 = 0x14
 ```
 
-- `down_param`: base packed haptic parameter for down reports.
-- `up_param`: base packed haptic parameter for up reports.
-- `haptics.normal.down_byte3`: byte 3 override for normal down haptic strength.
-- `haptics.normal.up_byte3`: byte 3 override for normal up haptic strength.
-- `haptics.force.down_byte3`: byte 3 override for force down haptic strength.
-- `haptics.force.up_byte3`: byte 3 override for force up haptic strength.
+`down_param` and `up_param` are packed byte fields. For a value written as
+`0xAABBCCDD`, the daemon currently uses:
+
+| Field | Report byte | Meaning |
+| --- | --- | --- |
+| `0xBB` | byte 3 | Main strength-like field. This has been the safest primary tuning knob. |
+| `0xCC` | byte 6 | Sharper/louder click character. Strong values can get aggressive quickly. |
+| `0xDD` | byte 11 | Deeper/louder click character. Strong values can feel more vertical. |
+
+The leading `0xAA` byte is ignored by the current daemon. With the default
+`down_param = 0x40170606`, the base down report gets byte 3 `0x17`, byte 6
+`0x06`, and byte 11 `0x06`. With `up_param = 0x26140000`, the base up report
+gets byte 3 `0x14`, byte 6 `0x00`, and byte 11 `0x00`.
+
+The `[haptics.normal]` and `[haptics.force]` sections override only byte 3 after
+the packed param is applied:
+
+- `haptics.normal.down_byte3`: byte 3 for normal click down haptics.
+- `haptics.normal.up_byte3`: byte 3 for normal click up haptics.
+- `haptics.force.down_byte3`: byte 3 for force-click down haptics.
+- `haptics.force.up_byte3`: byte 3 for force-click up haptics.
+
+For example, to make only force-click impact stronger without changing byte 6 or
+byte 11, raise `haptics.force.down_byte3` and leave `down_param` alone.
+
+Drag haptics reuse the normal click down/up reports, so `[haptics.normal]`
+changes affect drag texture too. Ridge haptics have their own `down_param`,
+`up_param`, `down_byte3`, and `up_byte3` under `[ridge_haptics]`.
+
+Practical tuning order:
+
+- adjust `down_byte3` first for impact strength;
+- adjust `up_byte3` only if release haptics feel too weak or too obvious;
+- adjust `down_ms`, `distance`, `min_gap_ms`, and `pulses` for drag/ridge timing;
+- touch `down_param` or `up_param` only when intentionally changing byte 6 or
+  byte 11.
+
+Empirical tuning notes from this hardware:
+
+- byte 3 behaves like the main strength control and has been usable across the
+  full byte range during short tests;
+- byte 6 adds a clickier, louder component and should usually stay at or below
+  `0x20`;
+- byte 11 adds a deeper/louder component and should usually stay at or below
+  `0x40`;
+- byte 6 and byte 11 can fail to produce a clean click when tested with no
+  finger on the pad, so always judge tuning under real touch conditions.
+
+The daemon does not currently clamp packed `*_param` fields. Treat byte 6 and
+byte 11 values above those ranges as experimental hardware-stress settings, and
+avoid sustained operation while testing them. `--dry-run` prints the final
+reports, which is the easiest way to confirm what bytes a config will send.
 
 ### Drag Haptics
 
