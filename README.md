@@ -13,6 +13,8 @@ haptic reports, and emits mouse button events through `/dev/uinput`.
 - A second one-finger click inside the double-click window uses a harder force
   threshold while held, which makes double-click-drag easier to perform without
   accidentally triggering force click.
+- One-finger click-drag can require a lower pressure before releasing the left
+  button, which makes held drags less likely to release accidentally.
 - Optional scroll haptics can add texture during two- or three-finger scrolling.
 
 The daemon restores firmware/default click mode when it exits unless
@@ -22,6 +24,12 @@ The daemon restores firmware/default click mode when it exits unless
 
 ```sh
 cargo build
+```
+
+For installable binaries:
+
+```sh
+cargo build --release
 ```
 
 ## Run
@@ -39,6 +47,27 @@ sudo target/debug/force-touchd --config config/scroll-haptics.toml
 ```
 
 Stop with `Ctrl-C`.
+
+## Systemd
+
+Install the release binary, config, and service unit:
+
+```sh
+sudo install -Dm755 target/release/force-touchd /usr/local/bin/force-touchd
+sudo install -Dm644 config/force-touch-linux.toml /etc/force-touch-linux/config.toml
+sudo install -Dm644 systemd/force-touchd.service /etc/systemd/system/force-touchd.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now force-touchd.service
+```
+
+Use `config/scroll-haptics.toml` instead when installing the config if scroll
+haptics should be enabled by default.
+
+Watch logs:
+
+```sh
+journalctl -u force-touchd.service -f
+```
 
 ## Configs
 
@@ -59,6 +88,11 @@ normal_threshold = 70
 force_threshold = 165
 double_click_force_threshold = 220
 double_click_window_ms = 350.0
+
+[drag_release]
+enabled = true
+movement = 80.0
+threshold = 45
 
 [drag_haptics]
 enabled = false

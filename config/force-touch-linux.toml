@@ -24,6 +24,12 @@ lockout_ms = 25.0
 stacked_release_gap_ms = 35.0
 suppress_normal_up_after_force_ms = 80.0
 
+[drag_release]
+enabled = true
+movement = 80.0
+threshold = 45
+debug = false
+
 [haptics]
 down_param = 0x40170606
 up_param = 0x26140000
@@ -46,4 +52,24 @@ min_gap_ms = 20.0
 down_ms = 4.0
 motion_epsilon = 2.0
 click_silence_ms = 0.0
+debug = false
+
+[ridge_haptics]
+enabled = false
+position = 0.0
+grid_columns = 1
+grid_rows = 1
+grid_x_min = -3600.0
+grid_x_max = 3600.0
+grid_y_min = -2400.0
+grid_y_max = 2400.0
+deadband = 80.0
+min_gap_ms = 80.0
+down_ms = 4.0
+pulses = 1
+pulse_gap_ms = 10.0
+down_param = 0x40170606
+up_param = 0x26140000
+down_byte3 = 0x17
+up_byte3 = 0x14
 debug = false

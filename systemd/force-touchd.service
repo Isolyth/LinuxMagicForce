@@ -1,0 +1,15 @@
+[Unit]
+Description=LinuxMagicForce Magic Trackpad 2 haptic daemon
+Documentation=https://github.com/Isolyth/LinuxMagicForce
+After=bluetooth.target
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/force-touchd --config /etc/force-touch-linux/config.toml
+Restart=on-failure
+RestartSec=2s
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

@@ -124,6 +124,14 @@ struct ReleaseConfig {
 }
 
 #[derive(Clone, Debug)]
+struct DragReleaseConfig {
+    enabled: bool,
+    movement: f64,
+    threshold: i32,
+    debug: bool,
+}
+
+#[derive(Clone, Debug)]
 struct HapticsConfig {
     down_param: u32,
     up_param: u32,
@@ -151,13 +159,37 @@ struct DragConfig {
 }
 
 #[derive(Clone, Debug)]
+struct RidgeConfig {
+    enabled: bool,
+    position: f64,
+    grid_columns: i32,
+    grid_rows: i32,
+    grid_x_min: f64,
+    grid_x_max: f64,
+    grid_y_min: f64,
+    grid_y_max: f64,
+    deadband: f64,
+    min_gap_ms: f64,
+    down_ms: f64,
+    pulses: i32,
+    pulse_gap_ms: f64,
+    down_param: u32,
+    up_param: u32,
+    down_byte3: u8,
+    up_byte3: u8,
+    debug: bool,
+}
+
+#[derive(Clone, Debug)]
 struct Config {
     device: DeviceConfig,
     input: InputConfig,
     clicks: ClickConfig,
     release: ReleaseConfig,
+    drag_release: DragReleaseConfig,
     haptics: HapticsConfig,
     drag: DragConfig,
+    ridge: RidgeConfig,
 }
 
 impl Default for Config {
@@ -189,6 +221,12 @@ impl Default for Config {
                 stacked_release_gap_ms: 35.0,
                 suppress_normal_up_after_force_ms: 80.0,
             },
+            drag_release: DragReleaseConfig {
+                enabled: true,
+                movement: 80.0,
+                threshold: 45,
+                debug: false,
+            },
             haptics: HapticsConfig {
                 down_param: MEDIUM_DOWN_PARAM,
                 up_param: MEDIUM_UP_PARAM,
@@ -210,6 +248,26 @@ impl Default for Config {
                 motion_epsilon: 2.0,
                 click_silence_ms: 0.0,
                 max_pressure: None,
+                debug: false,
+            },
+            ridge: RidgeConfig {
+                enabled: false,
+                position: 0.0,
+                grid_columns: 1,
+                grid_rows: 1,
+                grid_x_min: -3600.0,
+                grid_x_max: 3600.0,
+                grid_y_min: -2400.0,
+                grid_y_max: 2400.0,
+                deadband: 80.0,
+                min_gap_ms: 80.0,
+                down_ms: 4.0,
+                pulses: 1,
+                pulse_gap_ms: 10.0,
+                down_param: MEDIUM_DOWN_PARAM,
+                up_param: MEDIUM_UP_PARAM,
+                down_byte3: 0x17,
+                up_byte3: 0x14,
                 debug: false,
             },
         }
@@ -476,6 +534,10 @@ fn apply_config_value(config: &mut Config, key: &str, value: ConfigValue) -> Res
         "release.suppress_normal_up_after_force_ms" => {
             config.release.suppress_normal_up_after_force_ms = value_f64(key, value)?;
         }
+        "drag_release.enabled" => config.drag_release.enabled = value_bool(key, value)?,
+        "drag_release.movement" => config.drag_release.movement = value_f64(key, value)?,
+        "drag_release.threshold" => config.drag_release.threshold = value_i32(key, value)?,
+        "drag_release.debug" => config.drag_release.debug = value_bool(key, value)?,
         "haptics.down_param" => config.haptics.down_param = value_u32(key, value)?,
         "haptics.up_param" => config.haptics.up_param = value_u32(key, value)?,
         "haptics.normal.down_byte3" => {
@@ -515,6 +577,24 @@ fn apply_config_value(config: &mut Config, key: &str, value: ConfigValue) -> Res
         }
         "drag_haptics.max_pressure" => config.drag.max_pressure = Some(value_i32(key, value)?),
         "drag_haptics.debug" => config.drag.debug = value_bool(key, value)?,
+        "ridge_haptics.enabled" => config.ridge.enabled = value_bool(key, value)?,
+        "ridge_haptics.position" => config.ridge.position = value_f64(key, value)?,
+        "ridge_haptics.grid_columns" => config.ridge.grid_columns = value_i32(key, value)?,
+        "ridge_haptics.grid_rows" => config.ridge.grid_rows = value_i32(key, value)?,
+        "ridge_haptics.grid_x_min" => config.ridge.grid_x_min = value_f64(key, value)?,
+        "ridge_haptics.grid_x_max" => config.ridge.grid_x_max = value_f64(key, value)?,
+        "ridge_haptics.grid_y_min" => config.ridge.grid_y_min = value_f64(key, value)?,
+        "ridge_haptics.grid_y_max" => config.ridge.grid_y_max = value_f64(key, value)?,
+        "ridge_haptics.deadband" => config.ridge.deadband = value_f64(key, value)?,
+        "ridge_haptics.min_gap_ms" => config.ridge.min_gap_ms = value_f64(key, value)?,
+        "ridge_haptics.down_ms" => config.ridge.down_ms = value_f64(key, value)?,
+        "ridge_haptics.pulses" => config.ridge.pulses = value_i32(key, value)?,
+        "ridge_haptics.pulse_gap_ms" => config.ridge.pulse_gap_ms = value_f64(key, value)?,
+        "ridge_haptics.down_param" => config.ridge.down_param = value_u32(key, value)?,
+        "ridge_haptics.up_param" => config.ridge.up_param = value_u32(key, value)?,
+        "ridge_haptics.down_byte3" => config.ridge.down_byte3 = value_u8(key, value)?,
+        "ridge_haptics.up_byte3" => config.ridge.up_byte3 = value_u8(key, value)?,
+        "ridge_haptics.debug" => config.ridge.debug = value_bool(key, value)?,
         _ => return Err(format!("unknown config key: {key}")),
     }
     Ok(())
@@ -567,6 +647,19 @@ fn validate_config(config: &Config) -> Result<()> {
     }
     if config.clicks.double_click_window_ms < 0.0 {
         return Err("clicks.double_click_window_ms must not be negative".to_string());
+    }
+    if config.drag_release.enabled {
+        if config.drag_release.movement < 1.0 {
+            return Err("drag_release.movement must be at least 1".to_string());
+        }
+        if !(0..=255).contains(&config.drag_release.threshold) {
+            return Err("drag_release.threshold must be in byte range 0..255".to_string());
+        }
+        if config.drag_release.threshold > config.clicks.rearm_threshold {
+            return Err(
+                "drag_release.threshold must be at most clicks.rearm_threshold".to_string(),
+            );
+        }
     }
     if config.drag.enabled {
         let intervals = [
@@ -627,6 +720,56 @@ fn validate_config(config: &Config) -> Result<()> {
             }
         }
     }
+    if config.ridge.enabled {
+        if config.ridge.deadband < 1.0 {
+            return Err("ridge_haptics.deadband must be at least 1".to_string());
+        }
+        if !(1..=16).contains(&config.ridge.grid_columns) {
+            return Err("ridge_haptics.grid_columns must be between 1 and 16".to_string());
+        }
+        if !(1..=16).contains(&config.ridge.grid_rows) {
+            return Err("ridge_haptics.grid_rows must be between 1 and 16".to_string());
+        }
+        if config.ridge.grid_x_min >= config.ridge.grid_x_max {
+            return Err("ridge_haptics.grid_x_min must be less than grid_x_max".to_string());
+        }
+        if config.ridge.grid_y_min >= config.ridge.grid_y_max {
+            return Err("ridge_haptics.grid_y_min must be less than grid_y_max".to_string());
+        }
+        let grid_cell_width = (config.ridge.grid_x_max - config.ridge.grid_x_min)
+            / f64::from(config.ridge.grid_columns);
+        let grid_cell_height =
+            (config.ridge.grid_y_max - config.ridge.grid_y_min) / f64::from(config.ridge.grid_rows);
+        if config.ridge.grid_columns > 1 && config.ridge.deadband >= grid_cell_width {
+            return Err(
+                "ridge_haptics.deadband must be smaller than grid column width".to_string(),
+            );
+        }
+        if config.ridge.grid_rows > 1 && config.ridge.deadband >= grid_cell_height {
+            return Err("ridge_haptics.deadband must be smaller than grid row height".to_string());
+        }
+        if config.ridge.min_gap_ms < 20.0 {
+            return Err("ridge_haptics.min_gap_ms must be at least 20".to_string());
+        }
+        if config.ridge.down_ms >= config.ridge.min_gap_ms {
+            return Err(
+                "ridge_haptics.down_ms must be smaller than ridge_haptics.min_gap_ms".to_string(),
+            );
+        }
+        if !(1..=3).contains(&config.ridge.pulses) {
+            return Err("ridge_haptics.pulses must be between 1 and 3".to_string());
+        }
+        if config.ridge.pulse_gap_ms < 5.0 {
+            return Err("ridge_haptics.pulse_gap_ms must be at least 5".to_string());
+        }
+        let burst_ms = config.ridge.down_ms * f64::from(config.ridge.pulses)
+            + config.ridge.pulse_gap_ms * f64::from(config.ridge.pulses - 1);
+        if burst_ms >= config.ridge.min_gap_ms {
+            return Err(
+                "ridge haptic burst must be shorter than ridge_haptics.min_gap_ms".to_string(),
+            );
+        }
+    }
     Ok(())
 }
 
@@ -666,6 +809,18 @@ fn print_resolved_config(config: &Config, device: &str) {
         format_number(config.release.suppress_normal_up_after_force_ms)
     );
     println!(
+        "drag release: {}",
+        if config.drag_release.enabled {
+            format!(
+                "enabled movement={} release <= {}",
+                format_number(config.drag_release.movement),
+                config.drag_release.threshold
+            )
+        } else {
+            "disabled".to_string()
+        }
+    );
+    println!(
         "input: {}",
         if config.input.enabled {
             input_summary(config.input.force_button)
@@ -699,6 +854,43 @@ fn print_resolved_config(config: &Config, device: &str) {
                     .map_or_else(|| "off".to_string(), |value| value.to_string()),
                 format_number(config.drag.click_silence_ms),
             )
+        } else {
+            "disabled".to_string()
+        }
+    );
+    println!(
+        "ridge haptics: {}",
+        if config.ridge.enabled {
+            if config.ridge.grid_columns > 1 || config.ridge.grid_rows > 1 {
+                format!(
+                    "enabled grid={}x{} x={}..{} y={}..{} deadband={} min-gap={}ms down={}ms pulses={} pulse-gap={}ms down-param={:#010x} down-byte3={:#04x}",
+                    config.ridge.grid_columns,
+                    config.ridge.grid_rows,
+                    format_number(config.ridge.grid_x_min),
+                    format_number(config.ridge.grid_x_max),
+                    format_number(config.ridge.grid_y_min),
+                    format_number(config.ridge.grid_y_max),
+                    format_number(config.ridge.deadband),
+                    format_number(config.ridge.min_gap_ms),
+                    format_number(config.ridge.down_ms),
+                    config.ridge.pulses,
+                    format_number(config.ridge.pulse_gap_ms),
+                    config.ridge.down_param,
+                    config.ridge.down_byte3,
+                )
+            } else {
+                format!(
+                    "enabled x={} deadband={} min-gap={}ms down={}ms pulses={} pulse-gap={}ms down-param={:#010x} down-byte3={:#04x}",
+                    format_number(config.ridge.position),
+                    format_number(config.ridge.deadband),
+                    format_number(config.ridge.min_gap_ms),
+                    format_number(config.ridge.down_ms),
+                    config.ridge.pulses,
+                    format_number(config.ridge.pulse_gap_ms),
+                    config.ridge.down_param,
+                    config.ridge.down_byte3,
+                )
+            }
         } else {
             "disabled".to_string()
         }
@@ -1130,7 +1322,14 @@ fn should_fire_release(
     peak_after_down: i32,
     down_time: Option<Instant>,
     now: Instant,
+    click_drag_active: bool,
 ) -> (bool, String) {
+    if click_drag_active {
+        if pressure <= config.drag_release.threshold {
+            return (true, "drag-threshold".to_string());
+        }
+        return (false, String::new());
+    }
     if pressure <= config.clicks.reset_threshold {
         return (true, "threshold".to_string());
     }
@@ -1286,6 +1485,203 @@ impl DragState {
     }
 }
 
+#[derive(Default)]
+struct RidgeState {
+    previous_side: Option<i8>,
+    previous_cell: Option<(i32, i32)>,
+    last_haptic: Option<Instant>,
+}
+
+impl RidgeState {
+    fn grid_enabled(config: &Config) -> bool {
+        config.ridge.grid_columns > 1 || config.ridge.grid_rows > 1
+    }
+
+    fn side(config: &Config, centroid: (f64, f64)) -> Option<i8> {
+        let half_deadband = config.ridge.deadband / 2.0;
+        if centroid.0 < config.ridge.position - half_deadband {
+            Some(-1)
+        } else if centroid.0 > config.ridge.position + half_deadband {
+            Some(1)
+        } else {
+            None
+        }
+    }
+
+    fn grid_axis_index(value: f64, min: f64, max: f64, cells: i32, deadband: f64) -> Option<i32> {
+        if cells <= 1 {
+            return Some(0);
+        }
+
+        let span = max - min;
+        let half_deadband = deadband / 2.0;
+        for line in 1..cells {
+            let position = min + span * f64::from(line) / f64::from(cells);
+            if (value - position).abs() <= half_deadband {
+                return None;
+            }
+        }
+
+        let raw_index = ((value - min) / span * f64::from(cells)).floor() as i32;
+        Some(raw_index.clamp(0, cells - 1))
+    }
+
+    fn grid_cell(config: &Config, centroid: (f64, f64)) -> Option<(i32, i32)> {
+        let column = Self::grid_axis_index(
+            centroid.0,
+            config.ridge.grid_x_min,
+            config.ridge.grid_x_max,
+            config.ridge.grid_columns,
+            config.ridge.deadband,
+        )?;
+        let row = Self::grid_axis_index(
+            centroid.1,
+            config.ridge.grid_y_min,
+            config.ridge.grid_y_max,
+            config.ridge.grid_rows,
+            config.ridge.deadband,
+        )?;
+        Some((column, row))
+    }
+
+    fn send_pulses(&mut self, file: &mut File, config: &Config, reports: &Reports) -> Result<()> {
+        for pulse in 0..config.ridge.pulses {
+            write_output(file, &reports.ridge_down)?;
+            thread::sleep(Duration::from_secs_f64(config.ridge.down_ms / 1000.0));
+            write_output(file, &reports.ridge_up)?;
+            if pulse + 1 < config.ridge.pulses {
+                thread::sleep(Duration::from_secs_f64(config.ridge.pulse_gap_ms / 1000.0));
+            }
+        }
+        self.last_haptic = Some(Instant::now());
+        Ok(())
+    }
+
+    fn gap_elapsed(&self, config: &Config, now: Instant) -> bool {
+        self.last_haptic
+            .map(|last| now.duration_since(last).as_secs_f64() >= config.ridge.min_gap_ms / 1000.0)
+            .unwrap_or(true)
+    }
+
+    fn maybe_send(
+        &mut self,
+        file: &mut File,
+        config: &Config,
+        reports: &Reports,
+        now: Instant,
+        pressure: i32,
+        centroid: Option<(f64, f64)>,
+        touch_count: usize,
+    ) -> Result<()> {
+        if !config.ridge.enabled {
+            return Ok(());
+        }
+        let Some(centroid) = centroid else {
+            self.previous_side = None;
+            self.previous_cell = None;
+            return Ok(());
+        };
+
+        if Self::grid_enabled(config) {
+            return self.maybe_send_grid(
+                file,
+                config,
+                reports,
+                now,
+                pressure,
+                centroid,
+                touch_count,
+            );
+        }
+
+        self.maybe_send_single(file, config, reports, now, pressure, centroid, touch_count)
+    }
+
+    fn maybe_send_single(
+        &mut self,
+        file: &mut File,
+        config: &Config,
+        reports: &Reports,
+        now: Instant,
+        pressure: i32,
+        centroid: (f64, f64),
+        touch_count: usize,
+    ) -> Result<()> {
+        let Some(side) = Self::side(config, centroid) else {
+            return Ok(());
+        };
+        let Some(previous_side) = self.previous_side else {
+            self.previous_side = Some(side);
+            return Ok(());
+        };
+        if previous_side == side {
+            return Ok(());
+        }
+
+        self.previous_side = Some(side);
+        if !self.gap_elapsed(config, now) {
+            if config.ridge.debug {
+                println!(
+                    "ridge-skip pressure={pressure} fingers={touch_count} x={:.1} reason=min-gap",
+                    centroid.0
+                );
+            }
+            return Ok(());
+        }
+
+        if config.ridge.debug {
+            println!(
+                "ridge-haptic pressure={pressure} fingers={touch_count} x={:.1} position={} deadband={}",
+                centroid.0,
+                format_number(config.ridge.position),
+                format_number(config.ridge.deadband)
+            );
+        }
+        self.send_pulses(file, config, reports)
+    }
+
+    fn maybe_send_grid(
+        &mut self,
+        file: &mut File,
+        config: &Config,
+        reports: &Reports,
+        now: Instant,
+        pressure: i32,
+        centroid: (f64, f64),
+        touch_count: usize,
+    ) -> Result<()> {
+        let Some(cell) = Self::grid_cell(config, centroid) else {
+            return Ok(());
+        };
+        let Some(previous_cell) = self.previous_cell else {
+            self.previous_cell = Some(cell);
+            return Ok(());
+        };
+        if previous_cell == cell {
+            return Ok(());
+        }
+
+        self.previous_cell = Some(cell);
+        if !self.gap_elapsed(config, now) {
+            if config.ridge.debug {
+                println!(
+                    "ridge-grid-skip pressure={pressure} fingers={touch_count} x={:.1} y={:.1} cell={:?} reason=min-gap",
+                    centroid.0, centroid.1, cell
+                );
+            }
+            return Ok(());
+        }
+
+        if config.ridge.debug {
+            println!(
+                "ridge-grid-haptic pressure={pressure} fingers={touch_count} x={:.1} y={:.1} from={:?} to={:?}",
+                centroid.0, centroid.1, previous_cell, cell
+            );
+        }
+        self.send_pulses(file, config, reports)
+    }
+}
+
 struct Reports {
     normal_down: [u8; 15],
     normal_up: [u8; 15],
@@ -1293,6 +1689,8 @@ struct Reports {
     force_up: [u8; 15],
     drag_down: [u8; 15],
     drag_up: [u8; 15],
+    ridge_down: [u8; 15],
+    ridge_up: [u8; 15],
 }
 
 impl Reports {
@@ -1303,6 +1701,14 @@ impl Reports {
         let normal_up = byte3_report(base_up, config.haptics.normal_up_byte3);
         let force_down = byte3_report(base_down, config.haptics.force_down_byte3);
         let force_up = byte3_report(base_up, config.haptics.force_up_byte3);
+        let ridge_down = byte3_report(
+            haptic_report(VIB_DOWN_TEMPLATE, config.ridge.down_param),
+            config.ridge.down_byte3,
+        );
+        let ridge_up = byte3_report(
+            haptic_report(VIB_UP_TEMPLATE, config.ridge.up_param),
+            config.ridge.up_byte3,
+        );
         Self {
             normal_down,
             normal_up,
@@ -1310,6 +1716,8 @@ impl Reports {
             force_up,
             drag_down: normal_down,
             drag_up: normal_up,
+            ridge_down,
+            ridge_up,
         }
     }
 }
@@ -1325,10 +1733,13 @@ struct PressureState {
     last_click_haptic: Option<Instant>,
     last_normal_release: Option<Instant>,
     double_click_force_guard: bool,
+    click_drag_start_centroid: Option<(f64, f64)>,
+    click_drag_active: bool,
     peak_after_down: i32,
     previous_pressure: Option<i32>,
     previous_time: Option<Instant>,
     drag: DragState,
+    ridge: RidgeState,
 }
 
 fn send_click_down(file: &mut File, report: &[u8; 15], state: &mut PressureState) -> Result<()> {
@@ -1348,6 +1759,8 @@ fn send_click_up(file: &mut File, report: &[u8; 15], state: &mut PressureState) 
 fn record_normal_release(state: &mut PressureState, now: Instant) {
     state.last_normal_release = Some(now);
     state.double_click_force_guard = false;
+    state.click_drag_start_centroid = None;
+    state.click_drag_active = false;
 }
 
 fn is_double_click_hold(
@@ -1375,6 +1788,62 @@ fn active_force_threshold(config: &Config, state: &PressureState) -> i32 {
     }
 }
 
+fn update_click_drag_state(
+    config: &Config,
+    state: &mut PressureState,
+    centroid: Option<(f64, f64)>,
+) {
+    if !config.drag_release.enabled
+        || state.click_drag_active
+        || !state.normal_up_pending
+        || state.stage != 1
+    {
+        return;
+    }
+    let (Some(start), Some(centroid)) = (state.click_drag_start_centroid, centroid) else {
+        return;
+    };
+    let moved = ((centroid.0 - start.0).powi(2) + (centroid.1 - start.1).powi(2)).sqrt();
+    if moved < config.drag_release.movement {
+        return;
+    }
+    state.click_drag_active = true;
+    if config.drag_release.debug {
+        println!(
+            "click-drag active moved={:.1} threshold={} release <= {}",
+            moved,
+            format_number(config.drag_release.movement),
+            config.drag_release.threshold
+        );
+    }
+}
+
+fn maybe_send_motion_haptics(
+    file: &mut File,
+    config: &Config,
+    reports: &Reports,
+    state: &mut PressureState,
+    now: Instant,
+    pressure: i32,
+    centroid: Option<(f64, f64)>,
+    touch_count: usize,
+) -> Result<()> {
+    let last_click_haptic = state.last_click_haptic;
+    state
+        .ridge
+        .maybe_send(file, config, reports, now, pressure, centroid, touch_count)?;
+    state.drag.maybe_send(
+        file,
+        config,
+        reports,
+        now,
+        last_click_haptic,
+        pressure,
+        centroid,
+        touch_count,
+    )
+}
+
 fn process_report(
     file: &mut File,
     mouse: &mut VirtualMouse,
@@ -1394,6 +1863,9 @@ fn process_report(
     let now = Instant::now();
     let mut force_released_this_sample = false;
 
+    update_click_drag_state(config, state, centroid);
+    let guard_normal_drag_release =
+        state.stage == 1 && state.normal_up_pending && state.click_drag_active;
     let (release, release_reason) = should_fire_release(
         config,
         pressure,
@@ -1402,6 +1874,7 @@ fn process_report(
         state.peak_after_down,
         state.last_fire,
         now,
+        guard_normal_drag_release,
     );
 
     if state.stage == 1 && state.normal_up_pending && release {
@@ -1432,12 +1905,12 @@ fn process_report(
         println!("re-armed at pressure={pressure} reason=normal-release");
         state.stage = 0;
         state.peak_after_down = 0;
-        state.drag.maybe_send(
+        maybe_send_motion_haptics(
             file,
             config,
             reports,
+            state,
             now,
-            state.last_click_haptic,
             pressure,
             centroid,
             touch_count,
@@ -1482,12 +1955,12 @@ fn process_report(
         state.force_up_pending = false;
         state.force_rearmed = false;
         state.peak_after_down = 0;
-        state.drag.maybe_send(
+        maybe_send_motion_haptics(
             file,
             config,
             reports,
+            state,
             now,
-            state.last_click_haptic,
             pressure,
             centroid,
             touch_count,
@@ -1549,12 +2022,12 @@ fn process_report(
         state.force_up_pending = false;
         state.force_rearmed = false;
         state.peak_after_down = 0;
-        state.drag.maybe_send(
+        maybe_send_motion_haptics(
             file,
             config,
             reports,
+            state,
             now,
-            state.last_click_haptic,
             pressure,
             centroid,
             touch_count,
@@ -1586,13 +2059,19 @@ fn process_report(
         state.stage = 1;
         state.normal_up_pending = true;
         state.force_up_pending = false;
+        state.click_drag_start_centroid = if normal_button == BTN_LEFT {
+            centroid
+        } else {
+            None
+        };
+        state.click_drag_active = false;
         state.peak_after_down = pressure;
-        state.drag.maybe_send(
+        maybe_send_motion_haptics(
             file,
             config,
             reports,
+            state,
             now,
-            state.last_click_haptic,
             pressure,
             centroid,
             touch_count,
@@ -1637,12 +2116,12 @@ fn process_report(
         state.peak_after_down = state.peak_after_down.max(pressure);
     }
 
-    state.drag.maybe_send(
+    maybe_send_motion_haptics(
         file,
         config,
         reports,
+        state,
         now,
-        state.last_click_haptic,
         pressure,
         centroid,
         touch_count,

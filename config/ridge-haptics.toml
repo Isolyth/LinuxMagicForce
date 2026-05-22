@@ -43,7 +43,7 @@ down_byte3 = 0x17
 up_byte3 = 0x14
 
 [drag_haptics]
-enabled = true
+enabled = false
 mode = "scroll"
 distance = 12.0
 two_finger_distance = 14.0
@@ -55,7 +55,7 @@ click_silence_ms = 0.0
 debug = false
 
 [ridge_haptics]
-enabled = false
+enabled = true
 position = 0.0
 grid_columns = 1
 grid_rows = 1
@@ -64,12 +64,12 @@ grid_x_max = 3600.0
 grid_y_min = -2400.0
 grid_y_max = 2400.0
 deadband = 80.0
-min_gap_ms = 80.0
+min_gap_ms = 120.0
 down_ms = 4.0
 pulses = 1
 pulse_gap_ms = 10.0
-down_param = 0x40170606
+down_param = 0x40172006
 up_param = 0x26140000
-down_byte3 = 0x17
+down_byte3 = 0xff
 up_byte3 = 0x14
 debug = false
