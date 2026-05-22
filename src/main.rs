@@ -215,7 +215,7 @@ impl Default for Config {
             input: InputConfig {
                 enabled: true,
                 force_button: Some(BTN_RIGHT),
-                pending_left_ms: 100.0,
+                pending_left_ms: 150.0,
                 pending_left_motion: 30.0,
             },
             clicks: ClickConfig {

@@ -6,7 +6,7 @@ settle_ms = 20.0
 [input]
 enabled = true
 force_button = "right"
-pending_left_ms = 100.0
+pending_left_ms = 150.0
 pending_left_motion = 30.0
 
 [clicks]

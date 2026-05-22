@@ -109,7 +109,7 @@ settle_ms = 20.0
 [input]
 enabled = true
 force_button = "right" # left | right | middle | none
-pending_left_ms = 100.0
+pending_left_ms = 150.0
 pending_left_motion = 30.0
 ```
 
