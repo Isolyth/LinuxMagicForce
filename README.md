@@ -32,6 +32,14 @@ For installable binaries:
 cargo build --release
 ```
 
+With Nix:
+
+```sh
+nix build
+```
+
+The binary will be at `result/bin/force-touchd`.
+
 ## Run
 
 Run the daemon:
@@ -47,6 +55,12 @@ sudo target/debug/force-touchd --config config/scroll-haptics.toml
 ```
 
 Stop with `Ctrl-C`.
+
+Dry-run through the flake:
+
+```sh
+nix run . -- --config config/force-touch-linux.toml --dry-run
+```
 
 ## Systemd
 
@@ -71,6 +85,91 @@ haptics should be enabled by default.
 Watch logs:
 
 ```sh
+journalctl -u force-touchd.service -f
+```
+
+## NixOS
+
+The flake exposes:
+
+- `packages.${system}.default`: the `force-touchd` package.
+- `apps.${system}.default`: runs `force-touchd`.
+- `devShells.${system}.default`: Rust development shell.
+- `nixosModules.default`: NixOS module that creates `force-touchd.service`.
+- `overlays.default`: adds `linux-magic-force` to `pkgs`.
+
+For NixOS, prefer the module instead of manually installing the systemd unit:
+
+```nix
+{
+  inputs.linuxMagicForce.url = "github:Isolyth/LinuxMagicForce";
+
+  outputs = { nixpkgs, linuxMagicForce, ... }: {
+    nixosConfigurations.host = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        linuxMagicForce.nixosModules.default
+        {
+          services.linuxMagicForce.enable = true;
+        }
+      ];
+    };
+  };
+}
+```
+
+That creates `force-touchd.service` with the default config embedded in the Nix
+store. It runs as root, because the daemon needs access to `hidraw` and
+`/dev/uinput`.
+
+Use a local config file:
+
+```nix
+{
+  services.linuxMagicForce = {
+    enable = true;
+    configFile = ./force-touch-linux.toml;
+  };
+}
+```
+
+Or inline config text:
+
+```nix
+{
+  services.linuxMagicForce = {
+    enable = true;
+    configText = builtins.readFile ./force-touch-linux.toml;
+  };
+}
+```
+
+Use the bundled scroll-haptics config from the flake input:
+
+```nix
+{
+  services.linuxMagicForce = {
+    enable = true;
+    configText = builtins.readFile "${linuxMagicForce}/config/scroll-haptics.toml";
+  };
+}
+```
+
+Pass extra daemon flags:
+
+```nix
+{
+  services.linuxMagicForce = {
+    enable = true;
+    extraArgs = [ "--no-restore" ];
+  };
+}
+```
+
+After rebuilding, use the normal systemd tools:
+
+```sh
+sudo systemctl status force-touchd.service
 journalctl -u force-touchd.service -f
 ```
 
