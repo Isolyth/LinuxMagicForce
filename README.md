@@ -23,12 +23,6 @@ cargo build
 
 ## Run
 
-Dry-run the default config:
-
-```sh
-cargo run -- --config config/force-touch-linux.toml --dry-run
-```
-
 Run the daemon:
 
 ```sh
