@@ -1,30 +1,19 @@
 # LinuxMagicForce
 
-Userspace Magic Trackpad 2 Force Touch and haptics daemon for Linux.
+LinuxMagicForce is a userspace daemon for Bluetooth Magic Trackpad 2 haptics on
+Linux. It reads the trackpad through `hidraw`, enables host-click mode, sends
+haptic reports, and emits mouse button events through `/dev/uinput`.
 
-This is the Rust daemon port of the ForceTouchLinux probe. It talks to the
-Bluetooth Magic Trackpad 2 through `hidraw`, enables host-click mode, sends
-haptic output reports, and emits mouse buttons through `/dev/uinput`.
+## Behavior
 
-## Current Defaults
+- One-finger click emits left click.
+- Two-finger click emits right click.
+- Three-or-more-finger click emits middle click.
+- Force click emits a configurable button action.
+- Optional scroll haptics can add texture during two- or three-finger scrolling.
 
-The checked-in config matches the tuned Python command:
-
-```sh
-sudo python3 tools/mt2_haptic_probe.py pressure-clicks --drag-haptics --drag-haptic-mode scroll --drag-two-finger-distance 14 --drag-three-finger-distance 24 --drag-interval-ms 20
-```
-
-That means:
-
-- normal click pressure threshold: `70`
-- force click pressure threshold: `165`
-- force click emits right click
-- two-finger normal click emits right click
-- three-or-more-finger normal click emits middle click
-- drag haptics are enabled only for two- or three-finger scroll movement
-- two-finger drag haptic distance: `14`
-- three-finger drag haptic distance: `24`
-- drag haptic minimum gap: `20ms`
+The daemon restores firmware/default click mode when it exits unless
+`--no-restore` or `restore_on_exit = false` is set.
 
 ## Build
 
@@ -32,44 +21,57 @@ That means:
 cargo build
 ```
 
-Dry-run the resolved config and report bytes:
+## Run
+
+Dry-run the default config:
 
 ```sh
 cargo run -- --config config/force-touch-linux.toml --dry-run
 ```
 
-Run against the trackpad:
+Run the daemon:
 
 ```sh
 sudo target/debug/force-touchd --config config/force-touch-linux.toml
 ```
 
-Stop with `Ctrl-C`; the daemon restores firmware/default click mode on exit
-unless `--no-restore` or `restore_on_exit = false` is set.
+Run with scroll haptics enabled:
 
-## Config
-
-The default config lives at:
-
-```text
-config/force-touch-linux.toml
+```sh
+sudo target/debug/force-touchd --config config/scroll-haptics.toml
 ```
 
-Key tuning knobs:
+Stop with `Ctrl-C`.
+
+## Configs
+
+```text
+config/force-touch-linux.toml  # click/force-click haptics, scroll haptics off
+config/scroll-haptics.toml     # click/force-click haptics plus scroll texture
+```
+
+Important settings:
 
 ```toml
-[drag_haptics]
+[input]
 enabled = true
-mode = "scroll"
-two_finger_distance = 14.0
-three_finger_distance = 24.0
-min_gap_ms = 20.0
-motion_epsilon = 2.0
+force_button = "right" # left | right | middle | none
 
 [clicks]
 normal_threshold = 70
 force_threshold = 165
+
+[drag_haptics]
+enabled = false
+mode = "scroll" # any | scroll
+two_finger_distance = 14.0
+three_finger_distance = 24.0
+min_gap_ms = 20.0
+motion_epsilon = 2.0
 ```
 
-The daemon also looks for `/etc/force-touch-linux/config.toml` when no local
-config file is present.
+When no local config is provided, the daemon also checks:
+
+```text
+/etc/force-touch-linux/config.toml
+```

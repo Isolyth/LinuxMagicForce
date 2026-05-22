@@ -35,7 +35,7 @@ down_byte3 = 0x17
 up_byte3 = 0x14
 
 [drag_haptics]
-enabled = false
+enabled = true
 mode = "scroll"
 distance = 12.0
 two_finger_distance = 14.0

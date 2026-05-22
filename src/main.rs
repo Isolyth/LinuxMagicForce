@@ -99,6 +99,7 @@ struct DeviceConfig {
 #[derive(Clone, Debug)]
 struct InputConfig {
     enabled: bool,
+    force_button: Option<u16>,
 }
 
 #[derive(Clone, Debug)]
@@ -165,7 +166,10 @@ impl Default for Config {
                 restore_on_exit: true,
                 settle_ms: 20.0,
             },
-            input: InputConfig { enabled: true },
+            input: InputConfig {
+                enabled: true,
+                force_button: Some(BTN_RIGHT),
+            },
             clicks: ClickConfig {
                 normal_threshold: 70,
                 force_threshold: 165,
@@ -216,6 +220,7 @@ struct Args {
     force: bool,
     no_input: bool,
     no_restore: bool,
+    force_button: Option<Option<u16>>,
     seconds: Option<f64>,
 }
 
@@ -229,6 +234,7 @@ impl Args {
             force: false,
             no_input: false,
             no_restore: false,
+            force_button: None,
             seconds: None,
         };
 
@@ -248,6 +254,10 @@ impl Args {
                 "--force" => parsed.force = true,
                 "--no-input" | "--no-emit-input" => parsed.no_input = true,
                 "--no-restore" => parsed.no_restore = true,
+                "--force-button" => {
+                    let value = next_arg(&mut args, "--force-button")?;
+                    parsed.force_button = Some(parse_button_name("--force-button", &value)?);
+                }
                 "--seconds" => {
                     let value = next_arg(&mut args, "--seconds")?;
                     parsed.seconds = Some(parse_f64("--seconds", &value)?);
@@ -273,6 +283,7 @@ fn print_help() {
            --device HIDRAW     Override configured device path\n\
            --dry-run           Print resolved config and reports without touching hardware\n\
            --force             Allow non-Magic Trackpad 2 HID IDs\n\
+           --force-button BTN  Button emitted by force click: left, right, middle, none\n\
            --no-input          Disable /dev/uinput mouse events\n\
            --no-restore        Leave host-click mode enabled on exit\n\
            --seconds N         Stop after N seconds\n"
@@ -394,6 +405,16 @@ fn value_f64(key: &str, value: ConfigValue) -> Result<f64> {
     }
 }
 
+fn parse_button_name(key: &str, value: &str) -> Result<Option<u16>> {
+    match value {
+        "left" => Ok(Some(BTN_LEFT)),
+        "right" => Ok(Some(BTN_RIGHT)),
+        "middle" => Ok(Some(BTN_MIDDLE)),
+        "none" => Ok(None),
+        _ => Err(format!("{key} must be left, right, middle, or none")),
+    }
+}
+
 fn apply_config_value(config: &mut Config, key: &str, value: ConfigValue) -> Result<()> {
     match key {
         "device.path" => {
@@ -403,6 +424,9 @@ fn apply_config_value(config: &mut Config, key: &str, value: ConfigValue) -> Res
         "device.restore_on_exit" => config.device.restore_on_exit = value_bool(key, value)?,
         "device.settle_ms" => config.device.settle_ms = value_f64(key, value)?,
         "input.enabled" => config.input.enabled = value_bool(key, value)?,
+        "input.force_button" => {
+            config.input.force_button = parse_button_name(key, &value_string(key, value)?)?;
+        }
         "clicks.normal_threshold" => config.clicks.normal_threshold = value_i32(key, value)?,
         "clicks.force_threshold" => config.clicks.force_threshold = value_i32(key, value)?,
         "clicks.reset_threshold" => config.clicks.reset_threshold = value_i32(key, value)?,
@@ -601,9 +625,9 @@ fn print_resolved_config(config: &Config, device: &str) {
     println!(
         "input: {}",
         if config.input.enabled {
-            "1-finger=left, 2-finger=right, 3+-finger=middle, force=right"
+            input_summary(config.input.force_button)
         } else {
-            "disabled"
+            "disabled".to_string()
         }
     );
     println!(
@@ -815,6 +839,17 @@ fn button_name(button: u16) -> &'static str {
     }
 }
 
+fn optional_button_name(button: Option<u16>) -> &'static str {
+    button.map_or("none", button_name)
+}
+
+fn input_summary(force_button: Option<u16>) -> String {
+    format!(
+        "1-finger=left, 2-finger=right, 3+-finger=middle, force={}",
+        optional_button_name(force_button)
+    )
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct InputId {
@@ -853,11 +888,12 @@ fn write_struct<T>(file: &mut File, value: &T) -> std::io::Result<()> {
 struct VirtualMouse {
     file: Option<File>,
     normal_button: Option<u16>,
-    force_right_down: bool,
+    force_button: Option<u16>,
+    force_button_down: Option<u16>,
 }
 
 impl VirtualMouse {
-    fn new(enabled: bool) -> Result<Self> {
+    fn new(enabled: bool, force_button: Option<u16>) -> Result<Self> {
         let file = if enabled {
             Some(Self::open_uinput()?)
         } else {
@@ -866,7 +902,8 @@ impl VirtualMouse {
         Ok(Self {
             file,
             normal_button: None,
-            force_right_down: false,
+            force_button,
+            force_button_down: None,
         })
     }
 
@@ -940,7 +977,7 @@ impl VirtualMouse {
     }
 
     fn normal_down(&mut self, button: u16) -> Result<()> {
-        if self.file.is_some() && self.normal_button.is_none() && !self.force_right_down {
+        if self.file.is_some() && self.normal_button.is_none() && self.force_button_down.is_none() {
             self.key(button, true)?;
             self.normal_button = Some(button);
         }
@@ -955,23 +992,28 @@ impl VirtualMouse {
     }
 
     fn force_down(&mut self) -> Result<()> {
-        if self.file.is_none() || self.force_right_down {
+        let Some(force_button) = self.force_button else {
+            return Ok(());
+        };
+        if self.file.is_none() || self.force_button_down.is_some() {
             return Ok(());
         }
         if self.normal_button == Some(BTN_LEFT) {
+            if force_button == BTN_LEFT {
+                return Ok(());
+            }
             self.normal_up()?;
         } else if self.normal_button.is_some() {
             return Ok(());
         }
-        self.key(BTN_RIGHT, true)?;
-        self.force_right_down = true;
+        self.key(force_button, true)?;
+        self.force_button_down = Some(force_button);
         Ok(())
     }
 
     fn force_up(&mut self) -> Result<()> {
-        if self.force_right_down {
-            self.key(BTN_RIGHT, false)?;
-            self.force_right_down = false;
+        if let Some(button) = self.force_button_down.take() {
+            self.key(button, false)?;
         }
         Ok(())
     }
@@ -1548,10 +1590,11 @@ fn run_daemon(config: Config, force: bool, seconds: Option<f64>) -> Result<()> {
     thread::sleep(Duration::from_secs_f64(config.device.settle_ms / 1000.0));
     println!("host-click mode enabled; both haptic stages are host-generated");
 
-    let mut mouse = VirtualMouse::new(config.input.enabled)?;
+    let mut mouse = VirtualMouse::new(config.input.enabled, config.input.force_button)?;
     if config.input.enabled {
         println!(
-            "virtual mouse enabled; 1-finger=left 2-finger=right 3+-finger=middle force=right"
+            "virtual mouse enabled; {}",
+            input_summary(config.input.force_button)
         );
     }
     println!("watching pressure; press Ctrl-C to stop");
@@ -1606,6 +1649,9 @@ fn real_main() -> Result<()> {
     }
     if args.no_input {
         config.input.enabled = false;
+    }
+    if let Some(force_button) = args.force_button {
+        config.input.force_button = force_button;
     }
     if args.no_restore {
         config.device.restore_on_exit = false;
