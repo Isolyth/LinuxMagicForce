@@ -1,0 +1,8 @@
+[package]
+name = "linux-magic-force"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "force-touchd"
+path = "src/main.rs"
