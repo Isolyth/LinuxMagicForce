@@ -225,8 +225,8 @@ impl Default for Config {
                 pending_left_ms: 150.0,
                 pending_left_motion: 30.0,
                 multi_touch_drag_motion: true,
-                multi_touch_motion_x_scale: 1.0,
-                multi_touch_motion_y_scale: 1.0,
+                multi_touch_motion_x_scale: 0.5,
+                multi_touch_motion_y_scale: 0.5,
                 multi_touch_motion_debug: false,
             },
             clicks: ClickConfig {
