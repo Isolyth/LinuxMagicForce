@@ -20,7 +20,10 @@ const HOST_CLICK_OFF: [u8; 3] = [0xf2, 0x21, 0x00];
 
 const EV_SYN: u16 = 0x00;
 const EV_KEY: u16 = 0x01;
+const EV_REL: u16 = 0x02;
 const SYN_REPORT: u16 = 0x00;
+const REL_X: u16 = 0x00;
+const REL_Y: u16 = 0x01;
 const BTN_LEFT: u16 = 0x110;
 const BTN_RIGHT: u16 = 0x111;
 const BTN_MIDDLE: u16 = 0x112;
@@ -111,6 +114,10 @@ struct InputConfig {
     force_button: Option<u16>,
     pending_left_ms: f64,
     pending_left_motion: f64,
+    multi_touch_drag_motion: bool,
+    multi_touch_motion_x_scale: f64,
+    multi_touch_motion_y_scale: f64,
+    multi_touch_motion_debug: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -217,6 +224,10 @@ impl Default for Config {
                 force_button: Some(BTN_RIGHT),
                 pending_left_ms: 150.0,
                 pending_left_motion: 30.0,
+                multi_touch_drag_motion: true,
+                multi_touch_motion_x_scale: 1.0,
+                multi_touch_motion_y_scale: 1.0,
+                multi_touch_motion_debug: false,
             },
             clicks: ClickConfig {
                 normal_threshold: 70,
@@ -569,6 +580,18 @@ fn apply_config_value(config: &mut Config, key: &str, value: ConfigValue) -> Res
         }
         "input.pending_left_ms" => config.input.pending_left_ms = value_f64(key, value)?,
         "input.pending_left_motion" => config.input.pending_left_motion = value_f64(key, value)?,
+        "input.multi_touch_drag_motion" => {
+            config.input.multi_touch_drag_motion = value_bool(key, value)?;
+        }
+        "input.multi_touch_motion_x_scale" => {
+            config.input.multi_touch_motion_x_scale = value_f64(key, value)?;
+        }
+        "input.multi_touch_motion_y_scale" => {
+            config.input.multi_touch_motion_y_scale = value_f64(key, value)?;
+        }
+        "input.multi_touch_motion_debug" => {
+            config.input.multi_touch_motion_debug = value_bool(key, value)?;
+        }
         "clicks.normal_threshold" => config.clicks.normal_threshold = value_i32(key, value)?,
         "clicks.force_threshold" => config.clicks.force_threshold = value_i32(key, value)?,
         "clicks.double_click_force_threshold" => {
@@ -720,6 +743,12 @@ fn validate_config(config: &Config) -> Result<()> {
     }
     if config.input.pending_left_motion < 0.0 {
         return Err("input.pending_left_motion must not be negative".to_string());
+    }
+    if !config.input.multi_touch_motion_x_scale.is_finite() {
+        return Err("input.multi_touch_motion_x_scale must be finite".to_string());
+    }
+    if !config.input.multi_touch_motion_y_scale.is_finite() {
+        return Err("input.multi_touch_motion_y_scale must be finite".to_string());
     }
     if config.clicks.normal_release_threshold < 0
         || config.clicks.normal_release_threshold >= config.clicks.normal_threshold
@@ -903,10 +932,17 @@ fn print_resolved_config(config: &Config, device: &str) {
         "input: {}",
         if config.input.enabled {
             format!(
-                "{}; pending-left={}ms motion={}",
+                "{}; pending-left={}ms motion={}; multi-touch drag motion={} x-scale={} y-scale={}",
                 input_summary(config.input.force_button),
                 format_number(config.input.pending_left_ms),
-                format_number(config.input.pending_left_motion)
+                format_number(config.input.pending_left_motion),
+                if config.input.multi_touch_drag_motion {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
+                format_number(config.input.multi_touch_motion_x_scale),
+                format_number(config.input.multi_touch_motion_y_scale)
             )
         } else {
             "disabled".to_string()
@@ -1002,6 +1038,10 @@ fn ui_set_evbit() -> c_ulong {
 
 fn ui_set_keybit() -> c_ulong {
     ioc(IOC_WRITE, b'U', 101, 4)
+}
+
+fn ui_set_relbit() -> c_ulong {
+    ioc(IOC_WRITE, b'U', 102, 4)
 }
 
 fn ui_dev_create() -> c_ulong {
@@ -1214,7 +1254,7 @@ struct VirtualMouse {
 impl VirtualMouse {
     fn new(enabled: bool, force_button: Option<u16>) -> Result<Self> {
         let file = if enabled {
-            Some(Self::open_uinput()?)
+            Some(Self::open_uinput_mouse()?)
         } else {
             None
         };
@@ -1226,7 +1266,7 @@ impl VirtualMouse {
         })
     }
 
-    fn open_uinput() -> Result<File> {
+    fn open_uinput_mouse() -> Result<File> {
         let mut file = OpenOptions::new()
             .write(true)
             .open("/dev/uinput")
@@ -1234,7 +1274,11 @@ impl VirtualMouse {
         let fd = file.as_raw_fd();
         ioctl_result(
             unsafe { ioctl(fd, ui_set_evbit(), EV_KEY as c_int) },
-            "UI_SET_EVBIT",
+            "UI_SET_EVBIT EV_KEY",
+        )?;
+        ioctl_result(
+            unsafe { ioctl(fd, ui_set_evbit(), EV_REL as c_int) },
+            "UI_SET_EVBIT EV_REL",
         )?;
         ioctl_result(
             unsafe { ioctl(fd, ui_set_keybit(), BTN_LEFT as c_int) },
@@ -1247,6 +1291,14 @@ impl VirtualMouse {
         ioctl_result(
             unsafe { ioctl(fd, ui_set_keybit(), BTN_MIDDLE as c_int) },
             "UI_SET_KEYBIT BTN_MIDDLE",
+        )?;
+        ioctl_result(
+            unsafe { ioctl(fd, ui_set_relbit(), REL_X as c_int) },
+            "UI_SET_RELBIT REL_X",
+        )?;
+        ioctl_result(
+            unsafe { ioctl(fd, ui_set_relbit(), REL_Y as c_int) },
+            "UI_SET_RELBIT REL_Y",
         )?;
 
         let mut name = [0_u8; 80];
@@ -1292,6 +1344,19 @@ impl VirtualMouse {
 
     fn key(&mut self, code: u16, pressed: bool) -> Result<()> {
         self.emit(EV_KEY, code, if pressed { 1 } else { 0 })?;
+        self.sync()
+    }
+
+    fn rel_motion(&mut self, dx: i32, dy: i32) -> Result<()> {
+        if dx == 0 && dy == 0 {
+            return Ok(());
+        }
+        if dx != 0 {
+            self.emit(EV_REL, REL_X, dx)?;
+        }
+        if dy != 0 {
+            self.emit(EV_REL, REL_Y, dy)?;
+        }
         self.sync()
     }
 
@@ -1812,6 +1877,10 @@ struct PressureState {
     pending_normal_button: Option<u16>,
     pending_normal_deadline: Option<Instant>,
     pending_normal_centroid: Option<(f64, f64)>,
+    normal_click_touch_count: usize,
+    multi_touch_motion_last_centroid: Option<(f64, f64)>,
+    multi_touch_motion_x_remainder: f64,
+    multi_touch_motion_y_remainder: f64,
     click_drag_start_centroid: Option<(f64, f64)>,
     click_drag_active: bool,
     peak_after_down: i32,
@@ -1838,6 +1907,10 @@ fn send_click_up(file: &mut File, report: &[u8; 15], state: &mut PressureState) 
 fn record_normal_release(state: &mut PressureState, now: Instant) {
     state.last_normal_release = Some(now);
     state.double_click_force_guard = false;
+    state.normal_click_touch_count = 0;
+    state.multi_touch_motion_last_centroid = None;
+    state.multi_touch_motion_x_remainder = 0.0;
+    state.multi_touch_motion_y_remainder = 0.0;
     state.click_drag_start_centroid = None;
     state.click_drag_active = false;
 }
@@ -1895,6 +1968,10 @@ fn arm_normal_input(
     centroid: Option<(f64, f64)>,
     now: Instant,
 ) -> Result<bool> {
+    state.normal_click_touch_count = touch_count;
+    state.multi_touch_motion_last_centroid = if touch_count >= 2 { centroid } else { None };
+    state.multi_touch_motion_x_remainder = 0.0;
+    state.multi_touch_motion_y_remainder = 0.0;
     if should_defer_normal_input(config, button, touch_count) {
         state.pending_normal_button = Some(button);
         state.pending_normal_deadline =
@@ -1948,6 +2025,61 @@ fn maybe_commit_pending_for_motion(
     Ok(())
 }
 
+fn maybe_send_multi_touch_drag_motion(
+    config: &Config,
+    mouse: &mut VirtualMouse,
+    state: &mut PressureState,
+    centroid: Option<(f64, f64)>,
+    touch_count: usize,
+) -> Result<()> {
+    if !config.input.enabled
+        || !config.input.multi_touch_drag_motion
+        || !state.normal_up_pending
+        || state.normal_click_touch_count < 2
+    {
+        return Ok(());
+    }
+
+    let Some(centroid) = centroid else {
+        state.multi_touch_motion_last_centroid = None;
+        state.multi_touch_motion_x_remainder = 0.0;
+        state.multi_touch_motion_y_remainder = 0.0;
+        return Ok(());
+    };
+
+    if touch_count != state.normal_click_touch_count {
+        state.multi_touch_motion_last_centroid = Some(centroid);
+        state.multi_touch_motion_x_remainder = 0.0;
+        state.multi_touch_motion_y_remainder = 0.0;
+        return Ok(());
+    }
+
+    let Some(last) = state.multi_touch_motion_last_centroid else {
+        state.multi_touch_motion_last_centroid = Some(centroid);
+        return Ok(());
+    };
+
+    state.multi_touch_motion_last_centroid = Some(centroid);
+    let raw_dx = centroid.0 - last.0;
+    let raw_dy = centroid.1 - last.1;
+    let scaled_dx =
+        raw_dx * config.input.multi_touch_motion_x_scale + state.multi_touch_motion_x_remainder;
+    let scaled_dy =
+        raw_dy * config.input.multi_touch_motion_y_scale + state.multi_touch_motion_y_remainder;
+    let dx = scaled_dx.trunc() as i32;
+    let dy = scaled_dy.trunc() as i32;
+    state.multi_touch_motion_x_remainder = scaled_dx - f64::from(dx);
+    state.multi_touch_motion_y_remainder = scaled_dy - f64::from(dy);
+
+    if config.input.multi_touch_motion_debug && (dx != 0 || dy != 0) {
+        println!(
+            "multi-touch-motion fingers={touch_count} raw-dx={raw_dx:.1} raw-dy={raw_dy:.1} dx={dx} dy={dy}"
+        );
+    }
+
+    mouse.rel_motion(dx, dy)
+}
+
 fn normal_release_threshold_for_current_click(config: &Config, state: &PressureState) -> i32 {
     if state.click_drag_active {
         config.drag_release.threshold
@@ -1988,6 +2120,7 @@ fn update_click_drag_state(
 
 fn maybe_send_motion_haptics(
     file: &mut File,
+    mouse: &mut VirtualMouse,
     config: &Config,
     reports: &Reports,
     state: &mut PressureState,
@@ -1996,6 +2129,7 @@ fn maybe_send_motion_haptics(
     centroid: Option<(f64, f64)>,
     touch_count: usize,
 ) -> Result<()> {
+    maybe_send_multi_touch_drag_motion(config, mouse, state, centroid, touch_count)?;
     let last_click_haptic = state.last_click_haptic;
     state
         .ridge
@@ -2076,6 +2210,7 @@ fn process_report(
         state.peak_after_down = 0;
         maybe_send_motion_haptics(
             file,
+            mouse,
             config,
             reports,
             state,
@@ -2127,6 +2262,7 @@ fn process_report(
         state.peak_after_down = 0;
         maybe_send_motion_haptics(
             file,
+            mouse,
             config,
             reports,
             state,
@@ -2189,6 +2325,7 @@ fn process_report(
         if state.normal_up_pending {
             maybe_send_motion_haptics(
                 file,
+                mouse,
                 config,
                 reports,
                 state,
@@ -2210,6 +2347,7 @@ fn process_report(
         state.peak_after_down = 0;
         maybe_send_motion_haptics(
             file,
+            mouse,
             config,
             reports,
             state,
@@ -2264,6 +2402,7 @@ fn process_report(
         state.peak_after_down = pressure;
         maybe_send_motion_haptics(
             file,
+            mouse,
             config,
             reports,
             state,
@@ -2320,6 +2459,7 @@ fn process_report(
 
     maybe_send_motion_haptics(
         file,
+        mouse,
         config,
         reports,
         state,

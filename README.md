@@ -210,12 +210,19 @@ enabled = true
 force_button = "right" # left | right | middle | none
 pending_left_ms = 150.0
 pending_left_motion = 30.0
+multi_touch_drag_motion = true
+multi_touch_motion_x_scale = 1.0
+multi_touch_motion_y_scale = 1.0
+multi_touch_motion_debug = false
 ```
 
 - `enabled`: enables `/dev/uinput` mouse events. Haptics still run when disabled.
 - `force_button`: button emitted by one-finger force click.
 - `pending_left_ms`: delays one-finger left-button down so a quick force click can replace it.
 - `pending_left_motion`: commits pending left-button down early after this much centroid movement, so drags start promptly.
+- `multi_touch_drag_motion`: while a two-finger right click or three-finger middle click is held, emits relative cursor motion from the virtual mouse. Normal two-finger movement without a click is still left to libinput as scroll.
+- `multi_touch_motion_x_scale` / `multi_touch_motion_y_scale`: convert raw trackpad centroid deltas to relative mouse motion during multi-touch click drags. Flip the sign if drag direction is inverted.
+- `multi_touch_motion_debug`: logs synthesized multi-touch motion deltas.
 
 ### Clicks
 
