@@ -25,7 +25,7 @@
         rec {
           linux-magic-force = pkgs.rustPlatform.buildRustPackage {
             pname = "linux-magic-force";
-            version = "0.1.0";
+            version = "0.2.0";
 
             src = lib.cleanSource ./.;
             cargoLock.lockFile = ./Cargo.lock;

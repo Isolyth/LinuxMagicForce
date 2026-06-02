@@ -12,7 +12,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const BUS_BLUETOOTH: u32 = 0x05;
+const BUS_USB: u32 = 0x03;
 const APPLE_BT_VENDOR: u16 = 0x004c;
+const APPLE_USB_VENDOR: u16 = 0x05ac;
 const MAGIC_TRACKPAD2_PRODUCT: u16 = 0x0265;
 
 const HOST_CLICK_ON: [u8; 3] = [0xf2, 0x21, 0x01];
@@ -56,6 +58,9 @@ const IOC_NONE: u64 = 0;
 const SIGINT: c_int = 2;
 const SIGTERM: c_int = 15;
 const POLLIN: i16 = 0x0001;
+const POLLERR: i16 = 0x0008;
+const POLLHUP: i16 = 0x0010;
+const POLLNVAL: i16 = 0x0020;
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
@@ -1077,12 +1082,12 @@ fn get_raw_info(fd: RawFd) -> Result<RawInfo> {
 
 fn ensure_supported(file: &File, device: &str, force: bool) -> Result<()> {
     let info = get_raw_info(file.as_raw_fd())?;
-    let supported = info.bus == BUS_BLUETOOTH
-        && info.vendor == APPLE_BT_VENDOR
-        && info.product == MAGIC_TRACKPAD2_PRODUCT;
+    let supported = info.product == MAGIC_TRACKPAD2_PRODUCT
+        && ((info.bus == BUS_BLUETOOTH && info.vendor == APPLE_BT_VENDOR)
+            || (info.bus == BUS_USB && info.vendor == APPLE_USB_VENDOR));
     if !supported && !force {
         return Err(format!(
-            "{device} is bus={:#06x} vendor={:#06x} product={:#06x}, not Bluetooth Magic Trackpad 2",
+            "{device} is bus={:#06x} vendor={:#06x} product={:#06x}, not a Magic Trackpad 2 (Bluetooth or USB)",
             info.bus, info.vendor, info.product
         ));
     }
@@ -1434,26 +1439,43 @@ fn format_bytes(report: &[u8]) -> String {
 }
 
 fn auto_device() -> Result<String> {
+    const HID_ID_BT: &str = "HID_ID=0005:0000004C:00000265";
+    const HID_ID_USB: &str = "HID_ID=0003:000005AC:00000265";
+
     let entries = fs::read_dir("/sys/class/hidraw")
         .map_err(|err| format!("failed to read hidraw sysfs: {err}"))?;
-    let mut matches = Vec::new();
+    let mut usb_matches = Vec::new();
+    let mut bt_matches = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|err| format!("failed to read hidraw entry: {err}"))?;
         let name = entry.file_name();
-        let name = name.to_string_lossy();
+        let name = name.to_string_lossy().into_owned();
         let uevent = entry.path().join("device/uevent");
         let Ok(content) = fs::read_to_string(uevent) else {
             continue;
         };
-        let supported = content
-            .lines()
-            .any(|line| line.eq_ignore_ascii_case("HID_ID=0005:0000004C:00000265"));
-        if supported {
-            matches.push(format!("/dev/{name}"));
+        for line in content.lines() {
+            let line = line.trim();
+            if line.eq_ignore_ascii_case(HID_ID_USB) {
+                usb_matches.push(format!("/dev/{name}"));
+                break;
+            }
+            if line.eq_ignore_ascii_case(HID_ID_BT) {
+                bt_matches.push(format!("/dev/{name}"));
+                break;
+            }
         }
     }
+    // Prefer USB when both transports are present (e.g. trackpad plugged in
+    // while still paired over Bluetooth). USB stays awake and avoids the
+    // Bluetooth idle/disconnect dance entirely.
+    let mut matches = if !usb_matches.is_empty() {
+        usb_matches
+    } else {
+        bt_matches
+    };
     match matches.len() {
-        0 => Err("could not find Bluetooth Magic Trackpad 2".to_string()),
+        0 => Err("could not find a Magic Trackpad 2 (Bluetooth or USB)".to_string()),
         1 => Ok(matches.remove(0)),
         _ => Err(format!(
             "multiple Magic Trackpad 2 devices found: {}",
@@ -2503,7 +2525,18 @@ fn wait_readable(fd: RawFd, timeout_ms: c_int) -> Result<bool> {
     };
     let result = unsafe { poll(&mut poll_fd, 1, timeout_ms) };
     if result > 0 {
-        return Ok((poll_fd.revents & POLLIN) != 0);
+        let revents = poll_fd.revents;
+        // POLLHUP/POLLERR/POLLNVAL fire immediately every poll once the
+        // underlying transport (e.g. Bluetooth) drops. Without bailing out we
+        // would spin: poll returns 0ms forever with no POLLIN, hot-looping a
+        // core. Exit with an error so systemd's Restart=on-failure recycles
+        // us and we re-open whatever device is present (BT or USB).
+        if (revents & (POLLHUP | POLLERR | POLLNVAL)) != 0 {
+            return Err(format!(
+                "hidraw device disconnected (poll revents={revents:#06x})"
+            ));
+        }
+        return Ok((revents & POLLIN) != 0);
     }
     if result == 0 {
         return Ok(false);
@@ -2567,7 +2600,7 @@ fn run_daemon(config: Config, force: bool, seconds: Option<f64>) -> Result<()> {
             continue;
         }
         match file.read(&mut buf) {
-            Ok(0) => continue,
+            Ok(0) => return Err("hidraw read returned EOF; device disconnected".to_string()),
             Ok(len) => process_report(
                 &mut file,
                 &mut mouse,
