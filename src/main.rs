@@ -16,9 +16,12 @@ const BUS_USB: u32 = 0x03;
 const APPLE_BT_VENDOR: u16 = 0x004c;
 const APPLE_USB_VENDOR: u16 = 0x05ac;
 const MAGIC_TRACKPAD2_PRODUCT: u16 = 0x0265;
+const MAGIC_TRACKPAD_USBC_PRODUCT: u16 = 0x0324;
 
 const HOST_CLICK_ON: [u8; 3] = [0xf2, 0x21, 0x01];
 const HOST_CLICK_OFF: [u8; 3] = [0xf2, 0x21, 0x00];
+const REPORT_ID_INPUT_TOUCH: [u8; 2] = [0x85, 0x02];
+const REPORT_ID_OUTPUT_HAPTIC: [u8; 2] = [0x85, 0x53];
 
 const EV_SYN: u16 = 0x00;
 const EV_KEY: u16 = 0x01;
@@ -104,6 +107,28 @@ impl DragMode {
             Self::Scroll => "scroll",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Transport {
+    Legacy,
+    UsbC,
+}
+
+impl Transport {
+    fn from_product(product: u16) -> Self {
+        if product == MAGIC_TRACKPAD_USBC_PRODUCT {
+            Self::UsbC
+        } else {
+            Self::Legacy
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HidrawInterface {
+    Input,
+    Output,
 }
 
 #[derive(Clone, Debug)]
@@ -1037,6 +1062,10 @@ fn hid_iocgrawinfo() -> c_ulong {
     ioc(IOC_READ, b'H', 0x03, 8)
 }
 
+fn supported_product(product: u16) -> bool {
+    product == MAGIC_TRACKPAD2_PRODUCT || product == MAGIC_TRACKPAD_USBC_PRODUCT
+}
+
 fn ui_set_evbit() -> c_ulong {
     ioc(IOC_WRITE, b'U', 100, 4)
 }
@@ -1082,12 +1111,12 @@ fn get_raw_info(fd: RawFd) -> Result<RawInfo> {
 
 fn ensure_supported(file: &File, device: &str, force: bool) -> Result<()> {
     let info = get_raw_info(file.as_raw_fd())?;
-    let supported = info.product == MAGIC_TRACKPAD2_PRODUCT
+    let supported = supported_product(info.product)
         && ((info.bus == BUS_BLUETOOTH && info.vendor == APPLE_BT_VENDOR)
             || (info.bus == BUS_USB && info.vendor == APPLE_USB_VENDOR));
     if !supported && !force {
         return Err(format!(
-            "{device} is bus={:#06x} vendor={:#06x} product={:#06x}, not a Magic Trackpad 2 (Bluetooth or USB)",
+            "{device} is bus={:#06x} vendor={:#06x} product={:#06x}, not a supported Magic Trackpad (Bluetooth or USB)",
             info.bus, info.vendor, info.product
         ));
     }
@@ -1149,6 +1178,11 @@ fn signed(value: u32, bits: u8) -> i32 {
 }
 
 fn parse_touches(data: &[u8]) -> Vec<Touch> {
+    let data = if data.len() >= 9 && data[0] == 0x02 && data[8] == 0x31 {
+        &data[8..]
+    } else {
+        data
+    };
     if data.is_empty() || data[0] != 0x31 || data.len() < 4 || (data.len() - 4) % 9 != 0 {
         return Vec::new();
     }
@@ -1441,6 +1475,7 @@ fn format_bytes(report: &[u8]) -> String {
 fn auto_device() -> Result<String> {
     const HID_ID_BT: &str = "HID_ID=0005:0000004C:00000265";
     const HID_ID_USB: &str = "HID_ID=0003:000005AC:00000265";
+    const HID_ID_USBC: &str = "HID_ID=0003:000005AC:00000324";
 
     let entries = fs::read_dir("/sys/class/hidraw")
         .map_err(|err| format!("failed to read hidraw sysfs: {err}"))?;
@@ -1456,7 +1491,7 @@ fn auto_device() -> Result<String> {
         };
         for line in content.lines() {
             let line = line.trim();
-            if line.eq_ignore_ascii_case(HID_ID_USB) {
+            if line.eq_ignore_ascii_case(HID_ID_USB) || line.eq_ignore_ascii_case(HID_ID_USBC) {
                 usb_matches.push(format!("/dev/{name}"));
                 break;
             }
@@ -1466,6 +1501,7 @@ fn auto_device() -> Result<String> {
             }
         }
     }
+    usb_matches = prefer_output_report_interface(usb_matches);
     // Prefer USB when both transports are present (e.g. trackpad plugged in
     // while still paired over Bluetooth). USB stays awake and avoids the
     // Bluetooth idle/disconnect dance entirely.
@@ -1482,6 +1518,118 @@ fn auto_device() -> Result<String> {
             matches.join(", ")
         )),
     }
+}
+
+fn prefer_output_report_interface(matches: Vec<String>) -> Vec<String> {
+    let preferred: Vec<String> = matches
+        .iter()
+        .filter(|device| hidraw_matches_interface(device, HidrawInterface::Output))
+        .cloned()
+        .collect();
+    if preferred.is_empty() {
+        matches
+    } else {
+        preferred
+    }
+}
+
+fn hidraw_report_descriptor(device: &str) -> Option<Vec<u8>> {
+    let name = Path::new(device).file_name()?;
+    let descriptor = Path::new("/sys/class/hidraw")
+        .join(name)
+        .join("device/report_descriptor");
+    fs::read(descriptor).ok()
+}
+
+fn hidraw_matches_interface(device: &str, interface: HidrawInterface) -> bool {
+    let Some(bytes) = hidraw_report_descriptor(device) else {
+        return false;
+    };
+    match interface {
+        HidrawInterface::Input => {
+            bytes
+                .windows(2)
+                .any(|window| window == REPORT_ID_INPUT_TOUCH)
+                && !bytes
+                    .windows(2)
+                    .any(|window| window == REPORT_ID_OUTPUT_HAPTIC)
+        }
+        HidrawInterface::Output => bytes
+            .windows(2)
+            .any(|window| window == REPORT_ID_OUTPUT_HAPTIC),
+    }
+}
+
+fn hidraw_device_name(device: &str) -> Result<&std::ffi::OsStr> {
+    Path::new(device)
+        .file_name()
+        .ok_or_else(|| format!("invalid hidraw path: {device}"))
+}
+
+fn hidraw_device_path(name: &std::ffi::OsStr) -> String {
+    format!("/dev/{}", name.to_string_lossy())
+}
+
+fn hidraw_sysfs_path(device: &str) -> Result<PathBuf> {
+    Ok(Path::new("/sys/class/hidraw").join(hidraw_device_name(device)?))
+}
+
+fn hidraw_uevent_path(device: &str) -> Result<PathBuf> {
+    Ok(hidraw_sysfs_path(device)?.join("device/uevent"))
+}
+
+fn hidraw_device_from_entry(entry: &fs::DirEntry) -> String {
+    hidraw_device_path(&entry.file_name())
+}
+
+fn hidraw_is_usbc_trackpad(uevent: &str) -> bool {
+    hidraw_uevent_value(uevent, "HID_ID")
+        .map(|value| value.eq_ignore_ascii_case("0003:000005AC:00000324"))
+        .unwrap_or(false)
+}
+
+fn usbc_interface_device(seed_device: &str, interface: HidrawInterface) -> Result<String> {
+    if hidraw_matches_interface(seed_device, interface) {
+        return Ok(seed_device.to_string());
+    }
+
+    let seed_uevent = hidraw_uevent(seed_device)?;
+    let Some(seed_uniq) = hidraw_uevent_value(&seed_uevent, "HID_UNIQ") else {
+        return Ok(seed_device.to_string());
+    };
+    if seed_uniq.is_empty() {
+        return Ok(seed_device.to_string());
+    }
+
+    let entries = fs::read_dir("/sys/class/hidraw")
+        .map_err(|err| format!("failed to read hidraw sysfs: {err}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("failed to read hidraw entry: {err}"))?;
+        let device = hidraw_device_from_entry(&entry);
+        let Ok(uevent) = fs::read_to_string(entry.path().join("device/uevent")) else {
+            continue;
+        };
+        let same_trackpad = hidraw_is_usbc_trackpad(&uevent)
+            && hidraw_uevent_value(&uevent, "HID_UNIQ")
+                .map(|value| value == seed_uniq)
+                .unwrap_or(false);
+        if same_trackpad && hidraw_matches_interface(&device, interface) {
+            return Ok(device);
+        }
+    }
+    Ok(seed_device.to_string())
+}
+
+fn hidraw_uevent(device: &str) -> Result<String> {
+    let path = hidraw_uevent_path(device)?;
+    fs::read_to_string(&path).map_err(|err| format!("failed to read {}: {err}", path.display()))
+}
+
+fn hidraw_uevent_value(content: &str, key: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        let (line_key, value) = line.split_once('=')?;
+        (line_key == key).then(|| value.to_string())
+    })
 }
 
 fn should_fire_release(
@@ -1638,10 +1786,12 @@ impl DragState {
                 format_number(min_gap_ms)
             );
         }
-        write_output(file, &reports.drag_down)?;
+        let sent_down = write_haptic_output(file, &reports.drag_down)?;
         thread::sleep(Duration::from_secs_f64(config.drag.down_ms / 1000.0));
-        write_output(file, &reports.drag_up)?;
-        self.last_haptic = Some(Instant::now());
+        let sent_up = write_haptic_output(file, &reports.drag_up)?;
+        if sent_down || sent_up {
+            self.last_haptic = Some(Instant::now());
+        }
         self.distance_since_haptic = (self.distance_since_haptic - distance).max(0.0);
         self.touch_count = touch_count;
         Ok(())
@@ -1709,14 +1859,17 @@ impl RidgeState {
 
     fn send_pulses(&mut self, file: &mut File, config: &Config, reports: &Reports) -> Result<()> {
         for pulse in 0..config.ridge.pulses {
-            write_output(file, &reports.ridge_down)?;
+            let sent_down = write_haptic_output(file, &reports.ridge_down)?;
             thread::sleep(Duration::from_secs_f64(config.ridge.down_ms / 1000.0));
-            write_output(file, &reports.ridge_up)?;
+            let sent_up = write_haptic_output(file, &reports.ridge_up)?;
+            let sent = sent_down || sent_up;
             if pulse + 1 < config.ridge.pulses {
                 thread::sleep(Duration::from_secs_f64(config.ridge.pulse_gap_ms / 1000.0));
             }
+            if sent {
+                self.last_haptic = Some(Instant::now());
+            }
         }
-        self.last_haptic = Some(Instant::now());
         Ok(())
     }
 
@@ -1845,25 +1998,33 @@ impl RidgeState {
     }
 }
 
+enum HapticReport {
+    Output(Vec<u8>),
+    Device,
+    None,
+}
+
 struct Reports {
-    normal_down: [u8; 15],
-    normal_up: [u8; 15],
-    force_down: [u8; 15],
-    force_up: [u8; 15],
-    drag_down: [u8; 15],
-    drag_up: [u8; 15],
-    ridge_down: [u8; 15],
-    ridge_up: [u8; 15],
+    normal_down: HapticReport,
+    normal_up: HapticReport,
+    force_down: HapticReport,
+    force_up: HapticReport,
+    drag_down: HapticReport,
+    drag_up: HapticReport,
+    ridge_down: HapticReport,
+    ridge_up: HapticReport,
 }
 
 impl Reports {
-    fn from_config(config: &Config) -> Self {
+    fn from_config(config: &Config, transport: Transport) -> Self {
         let base_down = haptic_report(VIB_DOWN_TEMPLATE, config.haptics.down_param);
         let base_up = haptic_report(VIB_UP_TEMPLATE, config.haptics.up_param);
         let normal_down = byte3_report(base_down, config.haptics.normal_down_byte3);
         let normal_up = byte3_report(base_up, config.haptics.normal_up_byte3);
         let force_down = byte3_report(base_down, config.haptics.force_down_byte3);
         let force_up = byte3_report(base_up, config.haptics.force_up_byte3);
+        let drag_down = normal_down;
+        let drag_up = normal_up;
         let ridge_down = byte3_report(
             haptic_report(VIB_DOWN_TEMPLATE, config.ridge.down_param),
             config.ridge.down_byte3,
@@ -1873,15 +2034,54 @@ impl Reports {
             config.ridge.up_byte3,
         );
         Self {
-            normal_down,
-            normal_up,
-            force_down,
-            force_up,
-            drag_down: normal_down,
-            drag_up: normal_up,
-            ridge_down,
-            ridge_up,
+            normal_down: normal_haptic_report(normal_down, transport),
+            normal_up: release_haptic_report(normal_up, transport),
+            force_down: haptic_output_report(force_down, transport),
+            force_up: release_haptic_report(force_up, transport),
+            drag_down: haptic_output_report(drag_down, transport),
+            drag_up: release_haptic_report(drag_up, transport),
+            ridge_down: haptic_output_report(ridge_down, transport),
+            ridge_up: release_haptic_report(ridge_up, transport),
         }
+    }
+}
+
+fn haptic_output_report(report: [u8; 15], transport: Transport) -> HapticReport {
+    match transport {
+        Transport::Legacy => HapticReport::Output(report.to_vec()),
+        Transport::UsbC => HapticReport::Output(report[1..].to_vec()),
+    }
+}
+
+fn normal_haptic_report(report: [u8; 15], transport: Transport) -> HapticReport {
+    match transport {
+        Transport::Legacy => haptic_output_report(report, transport),
+        Transport::UsbC => HapticReport::Device,
+    }
+}
+
+fn release_haptic_report(report: [u8; 15], transport: Transport) -> HapticReport {
+    match transport {
+        Transport::Legacy => haptic_output_report(report, transport),
+        Transport::UsbC => HapticReport::None,
+    }
+}
+
+fn write_haptic_output(file: &mut File, report: &HapticReport) -> Result<bool> {
+    match report {
+        HapticReport::Output(report) => {
+            write_output(file, report)?;
+            Ok(true)
+        }
+        HapticReport::Device | HapticReport::None => Ok(false),
+    }
+}
+
+fn format_haptic_report(report: &HapticReport) -> String {
+    match report {
+        HapticReport::Output(report) => format_bytes(report),
+        HapticReport::Device => "device".to_string(),
+        HapticReport::None => "none".to_string(),
     }
 }
 
@@ -1912,17 +2112,23 @@ struct PressureState {
     ridge: RidgeState,
 }
 
-fn send_click_down(file: &mut File, report: &[u8; 15], state: &mut PressureState) -> Result<()> {
-    write_output(file, report)?;
-    let now = Instant::now();
-    state.last_fire = Some(now);
-    state.last_click_haptic = Some(now);
+fn send_click_down(
+    file: &mut File,
+    report: &HapticReport,
+    state: &mut PressureState,
+) -> Result<()> {
+    if write_haptic_output(file, report)? {
+        let now = Instant::now();
+        state.last_fire = Some(now);
+        state.last_click_haptic = Some(now);
+    }
     Ok(())
 }
 
-fn send_click_up(file: &mut File, report: &[u8; 15], state: &mut PressureState) -> Result<()> {
-    write_output(file, report)?;
-    state.last_click_haptic = Some(Instant::now());
+fn send_click_up(file: &mut File, report: &HapticReport, state: &mut PressureState) -> Result<()> {
+    if write_haptic_output(file, report)? {
+        state.last_click_haptic = Some(Instant::now());
+    }
     Ok(())
 }
 
@@ -2549,27 +2755,73 @@ fn wait_readable(fd: RawFd, timeout_ms: c_int) -> Result<bool> {
 }
 
 fn run_daemon(config: Config, force: bool, seconds: Option<f64>) -> Result<()> {
-    let device = config.device.path.clone().map_or_else(auto_device, Ok)?;
-    let reports = Reports::from_config(&config);
-    print_resolved_config(&config, &device);
-    println!("normal down: {}", format_bytes(&reports.normal_down));
-    println!("normal up:   {}", format_bytes(&reports.normal_up));
-    println!("force down:  {}", format_bytes(&reports.force_down));
-    println!("force up:    {}", format_bytes(&reports.force_up));
-
-    let mut file = OpenOptions::new()
+    let requested_device = config.device.path.clone().map_or_else(auto_device, Ok)?;
+    let requested_file = OpenOptions::new()
         .read(true)
         .write(true)
-        .open(&device)
-        .map_err(|err| format!("failed to open {device}: {err}"))?;
-    ensure_supported(&file, &device, force)?;
-    set_feature_fd(file.as_raw_fd(), &HOST_CLICK_ON)?;
-    let _guard = HostClickGuard {
-        fd: file.as_raw_fd(),
-        restore: config.device.restore_on_exit,
+        .open(&requested_device)
+        .map_err(|err| format!("failed to open {requested_device}: {err}"))?;
+    let raw_info = get_raw_info(requested_file.as_raw_fd())?;
+    ensure_supported(&requested_file, &requested_device, force)?;
+    let transport = Transport::from_product(raw_info.product);
+    let output_device = if transport == Transport::UsbC {
+        usbc_interface_device(&requested_device, HidrawInterface::Output)?
+    } else {
+        requested_device.clone()
+    };
+    let input_device = if transport == Transport::UsbC {
+        usbc_interface_device(&requested_device, HidrawInterface::Input)?
+    } else {
+        requested_device.clone()
+    };
+    let mut file = if output_device == requested_device {
+        requested_file
+    } else {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&output_device)
+            .map_err(|err| format!("failed to open {output_device}: {err}"))?
+    };
+    ensure_supported(&file, &output_device, force)?;
+    let reports = Reports::from_config(&config, transport);
+    print_resolved_config(&config, &output_device);
+    println!(
+        "normal down: {}",
+        format_haptic_report(&reports.normal_down)
+    );
+    println!("normal up:   {}", format_haptic_report(&reports.normal_up));
+    println!("force down:  {}", format_haptic_report(&reports.force_down));
+    println!("force up:    {}", format_haptic_report(&reports.force_up));
+
+    if input_device != output_device {
+        println!("input device: {input_device}");
+    }
+    let mut input_file = if input_device == output_device {
+        file.try_clone()
+            .map_err(|err| format!("failed to clone {output_device}: {err}"))?
+    } else {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&input_device)
+            .map_err(|err| format!("failed to open {input_device}: {err}"))?
+    };
+    ensure_supported(&input_file, &input_device, force)?;
+    let _guard = if transport == Transport::UsbC {
+        println!("host-click setup skipped for USB-C Magic Trackpad");
+        None
+    } else {
+        set_feature_fd(file.as_raw_fd(), &HOST_CLICK_ON)?;
+        Some(HostClickGuard {
+            fd: file.as_raw_fd(),
+            restore: config.device.restore_on_exit,
+        })
     };
     thread::sleep(Duration::from_secs_f64(config.device.settle_ms / 1000.0));
-    println!("host-click mode enabled; both haptic stages are host-generated");
+    if transport != Transport::UsbC {
+        println!("host-click mode enabled; both haptic stages are host-generated");
+    }
 
     let mut mouse = VirtualMouse::new(config.input.enabled, config.input.force_button)?;
     if config.input.enabled {
@@ -2588,7 +2840,7 @@ fn run_daemon(config: Config, force: bool, seconds: Option<f64>) -> Result<()> {
             break;
         }
         let timeout_ms = next_read_timeout(end, &state);
-        let readable = wait_readable(file.as_raw_fd(), timeout_ms)?;
+        let readable = wait_readable(input_file.as_raw_fd(), timeout_ms)?;
         if state
             .pending_normal_deadline
             .map(|deadline| Instant::now() >= deadline)
@@ -2599,7 +2851,7 @@ fn run_daemon(config: Config, force: bool, seconds: Option<f64>) -> Result<()> {
         if !readable {
             continue;
         }
-        match file.read(&mut buf) {
+        match input_file.read(&mut buf) {
             Ok(0) => return Err("hidraw read returned EOF; device disconnected".to_string()),
             Ok(len) => process_report(
                 &mut file,
@@ -2679,16 +2931,18 @@ fn real_main() -> Result<()> {
         .clone()
         .unwrap_or_else(|| "auto".to_string());
     if args.dry_run {
-        let reports = Reports::from_config(&config);
+        let reports = Reports::from_config(&config, Transport::Legacy);
         print_resolved_config(&config, &device);
-        println!("normal down: {}", format_bytes(&reports.normal_down));
-        println!("normal up:   {}", format_bytes(&reports.normal_up));
-        println!("force down:  {}", format_bytes(&reports.force_down));
-        println!("force up:    {}", format_bytes(&reports.force_up));
+        println!(
+            "normal down: {}",
+            format_haptic_report(&reports.normal_down)
+        );
+        println!("normal up:   {}", format_haptic_report(&reports.normal_up));
+        println!("force down:  {}", format_haptic_report(&reports.force_down));
+        println!("force up:    {}", format_haptic_report(&reports.force_up));
         println!("dry-run: no reports sent");
         return Ok(());
     }
-
     run_daemon(config, args.force, args.seconds)
 }
 
