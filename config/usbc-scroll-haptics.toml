@@ -1,0 +1,88 @@
+[device]
+path = "auto"
+restore_on_exit = true
+settle_ms = 20.0
+
+[input]
+enabled = true
+force_button = "right"
+pending_left_ms = 150.0
+pending_left_motion = 30.0
+multi_touch_drag_motion = true
+multi_touch_motion_x_scale = 0.5
+multi_touch_motion_y_scale = 0.5
+multi_touch_motion_debug = false
+
+[clicks]
+normal_threshold = 70
+force_threshold = 165
+double_click_force_threshold = 220
+double_click_window_ms = 350.0
+reset_threshold = 35
+rearm_threshold = 65
+force_rearm_threshold = 125
+normal_release_threshold = 60
+drag_release_threshold = 30
+drag_release_motion = 30.0
+min_gap_ms = 120.0
+
+[release]
+drop = 18
+rate = 700.0
+lockout_ms = 25.0
+stacked_release_gap_ms = 35.0
+suppress_normal_up_after_force_ms = 80.0
+
+[drag_release]
+enabled = true
+movement = 30.0
+threshold = 30
+debug = false
+
+[haptics]
+down_param = 0x40170606
+up_param = 0x26140000
+
+[haptics.normal]
+down_byte3 = 0x17
+up_byte3 = 0x14
+
+[haptics.force]
+down_byte3 = 0x17
+up_byte3 = 0x14
+
+[drag_haptics]
+enabled = true
+mode = "scroll"
+distance = 12.0
+two_finger_distance = 14.0
+three_finger_distance = 24.0
+min_gap_ms = 20.0
+down_ms = 2.0
+motion_epsilon = 2.0
+click_silence_ms = 0.0
+down_param = 0x40170101
+up_param = 0x26140000
+down_byte3 = 0x08
+up_byte3 = 0x14
+debug = false
+
+[ridge_haptics]
+enabled = false
+position = 0.0
+grid_columns = 1
+grid_rows = 1
+grid_x_min = -3600.0
+grid_x_max = 3600.0
+grid_y_min = -2400.0
+grid_y_max = 2400.0
+deadband = 80.0
+min_gap_ms = 80.0
+down_ms = 4.0
+pulses = 1
+pulse_gap_ms = 10.0
+down_param = 0x40170606
+up_param = 0x26140000
+down_byte3 = 0x17
+up_byte3 = 0x14
+debug = false

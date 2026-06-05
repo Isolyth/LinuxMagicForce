@@ -204,6 +204,10 @@ struct DragConfig {
     motion_epsilon: f64,
     click_silence_ms: f64,
     max_pressure: Option<i32>,
+    down_param: Option<u32>,
+    up_param: Option<u32>,
+    down_byte3: Option<u8>,
+    up_byte3: Option<u8>,
     debug: bool,
 }
 
@@ -304,6 +308,10 @@ impl Default for Config {
                 motion_epsilon: 2.0,
                 click_silence_ms: 0.0,
                 max_pressure: None,
+                down_param: None,
+                up_param: None,
+                down_byte3: None,
+                up_byte3: None,
                 debug: false,
             },
             ridge: RidgeConfig {
@@ -696,6 +704,10 @@ fn apply_config_value(config: &mut Config, key: &str, value: ConfigValue) -> Res
             config.drag.click_silence_ms = value_f64(key, value)?;
         }
         "drag_haptics.max_pressure" => config.drag.max_pressure = Some(value_i32(key, value)?),
+        "drag_haptics.down_param" => config.drag.down_param = Some(value_u32(key, value)?),
+        "drag_haptics.up_param" => config.drag.up_param = Some(value_u32(key, value)?),
+        "drag_haptics.down_byte3" => config.drag.down_byte3 = Some(value_u8(key, value)?),
+        "drag_haptics.up_byte3" => config.drag.up_byte3 = Some(value_u8(key, value)?),
         "drag_haptics.debug" => config.drag.debug = value_bool(key, value)?,
         "ridge_haptics.enabled" => config.ridge.enabled = value_bool(key, value)?,
         "ridge_haptics.position" => config.ridge.position = value_f64(key, value)?,
@@ -2023,8 +2035,26 @@ impl Reports {
         let normal_up = byte3_report(base_up, config.haptics.normal_up_byte3);
         let force_down = byte3_report(base_down, config.haptics.force_down_byte3);
         let force_up = byte3_report(base_up, config.haptics.force_up_byte3);
-        let drag_down = normal_down;
-        let drag_up = normal_up;
+        let drag_down = byte3_report(
+            haptic_report(
+                VIB_DOWN_TEMPLATE,
+                config.drag.down_param.unwrap_or(config.haptics.down_param),
+            ),
+            config
+                .drag
+                .down_byte3
+                .unwrap_or(config.haptics.normal_down_byte3),
+        );
+        let drag_up = byte3_report(
+            haptic_report(
+                VIB_UP_TEMPLATE,
+                config.drag.up_param.unwrap_or(config.haptics.up_param),
+            ),
+            config
+                .drag
+                .up_byte3
+                .unwrap_or(config.haptics.normal_up_byte3),
+        );
         let ridge_down = byte3_report(
             haptic_report(VIB_DOWN_TEMPLATE, config.ridge.down_param),
             config.ridge.down_byte3,
@@ -2049,7 +2079,13 @@ impl Reports {
 fn haptic_output_report(report: [u8; 15], transport: Transport) -> HapticReport {
     match transport {
         Transport::Legacy => HapticReport::Output(report.to_vec()),
-        Transport::UsbC => HapticReport::Output(report[1..].to_vec()),
+        Transport::UsbC => {
+            let mut report = report[1..].to_vec();
+            if report.len() > 10 {
+                report[8] = report[10];
+            }
+            HapticReport::Output(report)
+        }
     }
 }
 
