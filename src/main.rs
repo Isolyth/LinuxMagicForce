@@ -116,8 +116,13 @@ enum Transport {
 }
 
 impl Transport {
-    fn from_product(product: u16) -> Self {
-        if product == MAGIC_TRACKPAD_USBC_PRODUCT {
+    /// The split-interface protocol (separate input/output hidraw nodes,
+    /// native normal click, 0x53 haptic output reports) applies to the USB-C
+    /// trackpad by product ID and to any trackpad exposing the 0x53 haptic
+    /// output report — the Lightning Magic Trackpad 2 plugged in over USB
+    /// presents the same layout, with no 0xf2 host-click report.
+    fn detect(product: u16, has_haptic_output_interface: bool) -> Self {
+        if product == MAGIC_TRACKPAD_USBC_PRODUCT || has_haptic_output_interface {
             Self::UsbC
         } else {
             Self::Legacy
@@ -1594,23 +1599,26 @@ fn hidraw_device_from_entry(entry: &fs::DirEntry) -> String {
     hidraw_device_path(&entry.file_name())
 }
 
-fn hidraw_is_usbc_trackpad(uevent: &str) -> bool {
-    hidraw_uevent_value(uevent, "HID_ID")
-        .map(|value| value.eq_ignore_ascii_case("0003:000005AC:00000324"))
-        .unwrap_or(false)
-}
-
-fn usbc_interface_device(seed_device: &str, interface: HidrawInterface) -> Result<String> {
+/// Finds the hidraw node carrying `interface` for the trackpad behind
+/// `seed_device`: the seed itself, or a sibling hidraw node with the same
+/// HID_ID and HID_UNIQ. Returns None when no interface matches.
+fn find_trackpad_interface(
+    seed_device: &str,
+    interface: HidrawInterface,
+) -> Result<Option<String>> {
     if hidraw_matches_interface(seed_device, interface) {
-        return Ok(seed_device.to_string());
+        return Ok(Some(seed_device.to_string()));
     }
 
     let seed_uevent = hidraw_uevent(seed_device)?;
+    let Some(seed_id) = hidraw_uevent_value(&seed_uevent, "HID_ID") else {
+        return Ok(None);
+    };
     let Some(seed_uniq) = hidraw_uevent_value(&seed_uevent, "HID_UNIQ") else {
-        return Ok(seed_device.to_string());
+        return Ok(None);
     };
     if seed_uniq.is_empty() {
-        return Ok(seed_device.to_string());
+        return Ok(None);
     }
 
     let entries = fs::read_dir("/sys/class/hidraw")
@@ -1621,15 +1629,17 @@ fn usbc_interface_device(seed_device: &str, interface: HidrawInterface) -> Resul
         let Ok(uevent) = fs::read_to_string(entry.path().join("device/uevent")) else {
             continue;
         };
-        let same_trackpad = hidraw_is_usbc_trackpad(&uevent)
+        let same_trackpad = hidraw_uevent_value(&uevent, "HID_ID")
+            .map(|value| value.eq_ignore_ascii_case(&seed_id))
+            .unwrap_or(false)
             && hidraw_uevent_value(&uevent, "HID_UNIQ")
                 .map(|value| value == seed_uniq)
                 .unwrap_or(false);
         if same_trackpad && hidraw_matches_interface(&device, interface) {
-            return Ok(device);
+            return Ok(Some(device));
         }
     }
-    Ok(seed_device.to_string())
+    Ok(None)
 }
 
 fn hidraw_uevent(device: &str) -> Result<String> {
@@ -2799,14 +2809,17 @@ fn run_daemon(config: Config, force: bool, seconds: Option<f64>) -> Result<()> {
         .map_err(|err| format!("failed to open {requested_device}: {err}"))?;
     let raw_info = get_raw_info(requested_file.as_raw_fd())?;
     ensure_supported(&requested_file, &requested_device, force)?;
-    let transport = Transport::from_product(raw_info.product);
+    let haptic_output_interface =
+        find_trackpad_interface(&requested_device, HidrawInterface::Output)?;
+    let transport = Transport::detect(raw_info.product, haptic_output_interface.is_some());
     let output_device = if transport == Transport::UsbC {
-        usbc_interface_device(&requested_device, HidrawInterface::Output)?
+        haptic_output_interface.unwrap_or_else(|| requested_device.clone())
     } else {
         requested_device.clone()
     };
     let input_device = if transport == Transport::UsbC {
-        usbc_interface_device(&requested_device, HidrawInterface::Input)?
+        find_trackpad_interface(&requested_device, HidrawInterface::Input)?
+            .unwrap_or_else(|| requested_device.clone())
     } else {
         requested_device.clone()
     };
