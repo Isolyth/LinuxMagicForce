@@ -35,6 +35,8 @@
                 $out/share/linux-magic-force/force-touch-linux.toml
               install -Dm644 config/scroll-haptics.toml \
                 $out/share/linux-magic-force/scroll-haptics.toml
+              install -Dm644 config/usbc-scroll-haptics.toml \
+                $out/share/linux-magic-force/usbc-scroll-haptics.toml
               install -Dm644 config/ridge-haptics.toml \
                 $out/share/linux-magic-force/ridge-haptics.toml
               install -d $out/lib/systemd/system

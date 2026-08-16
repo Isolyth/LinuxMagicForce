@@ -178,6 +178,7 @@ journalctl -u force-touchd.service -f
 ```text
 config/force-touch-linux.toml  # click/force-click haptics, scroll haptics off
 config/scroll-haptics.toml     # click/force-click haptics plus scroll texture
+config/usbc-scroll-haptics.toml # USB-C force-click plus softer scroll texture
 config/ridge-haptics.toml      # center-ridge haptic test config
 ```
 
@@ -346,9 +347,9 @@ the packed param is applied:
 For example, to make only force-click impact stronger without changing byte 6 or
 byte 11, raise `haptics.force.down_byte3` and leave `down_param` alone.
 
-Drag haptics reuse the normal click down/up reports, so `[haptics.normal]`
-changes affect drag texture too. Ridge haptics have their own `down_param`,
-`up_param`, `down_byte3`, and `up_byte3` under `[ridge_haptics]`.
+Drag haptics default to the normal click down/up reports, but can override
+`down_param`, `up_param`, `down_byte3`, and `up_byte3` under `[drag_haptics]`.
+Ridge haptics have their own haptic fields under `[ridge_haptics]`.
 
 Practical tuning order:
 
@@ -390,6 +391,10 @@ down_ms = 4.0
 motion_epsilon = 2.0
 click_silence_ms = 0.0
 max_pressure = 120
+down_param = 0x40170101
+up_param = 0x26140000
+down_byte3 = 0x08
+up_byte3 = 0x14
 debug = false
 ```
 
@@ -405,6 +410,8 @@ debug = false
 - `motion_epsilon`: ignores per-sample movement at or below this distance.
 - `click_silence_ms`: suppresses drag haptics briefly after click haptics.
 - `max_pressure`: optional pressure cap for drag haptics. Omit to allow any pressure.
+- `down_param` / `up_param`: optional packed haptic parameter override for drag haptics.
+- `down_byte3` / `up_byte3`: optional byte 3 override for drag haptics.
 - `debug`: logs drag haptic trigger decisions.
 
 ### Ridge Haptics
