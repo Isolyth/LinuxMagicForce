@@ -48,7 +48,7 @@ down_byte3 = 0x17
 up_byte3 = 0x14
 
 [haptics.force]
-down_byte3 = 0x17
+down_byte3 = 0x30
 up_byte3 = 0x14
 
 [drag_haptics]
